@@ -2,6 +2,7 @@
 ╔══════════════════════════════════════════════════════════════╗
 ║        CONTEST HUNTER BOT — Interactive Telegram Version     ║
 ║   Scrapes Twitter/X → Alerts subscribers via Telegram        ║
+║   Backend: twitterapi.io  (replaces ntscraper/Nitter)        ║
 ╚══════════════════════════════════════════════════════════════╝
 
 USER COMMANDS:
@@ -18,10 +19,11 @@ USER COMMANDS:
     /help               → Show all commands
 
 SETUP:
-    pip install ntscraper python-telegram-bot python-dotenv schedule
+    pip install requests python-telegram-bot python-dotenv
 
 .env file:
     TELEGRAM_BOT_TOKEN=your_bot_token
+    TWITTERAPI_KEY=your_twitterapi_io_key
     CHECK_INTERVAL=20
 """
 
@@ -30,14 +32,9 @@ import re
 import json
 import logging
 import asyncio
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
-
-try:
-    from ntscraper import Nitter
-except ImportError:
-    print("Run: pip install ntscraper python-telegram-bot python-dotenv schedule")
-    exit(1)
 
 try:
     from telegram import Update, BotCommand
@@ -53,6 +50,7 @@ except ImportError:
 load_dotenv()
 
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TWITTERAPI_KEY  = os.getenv("TWITTERAPI_KEY", "")
 CHECK_INTERVAL  = int(os.getenv("CHECK_INTERVAL", 20))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -214,27 +212,87 @@ def score_tweet(text: str, contest_type: str) -> tuple:
 
     return score, reasons
 
-# ── Scraper ───────────────────────────────────────────────────────────────────
-SCRAPE_TIMEOUT = 10  # seconds per query before giving up on a slow/dead Nitter instance
+# ── twitterapi.io Scraper ─────────────────────────────────────────────────────
+SCRAPE_TIMEOUT = 15  # seconds per HTTP request
+
+TWITTERAPI_BASE = "https://api.twitterapi.io/twitter/tweet/advanced_search"
+
+def _normalize_tweet(raw: dict) -> dict:
+    """
+    Convert a twitterapi.io tweet object into the same shape the rest of the
+    bot expects so nothing else in the code needs to change.
+
+    twitterapi.io response fields (relevant subset):
+        id, text, author.userName, publicMetrics.likeCount,
+        publicMetrics.retweetCount, url
+    """
+    author   = raw.get("author", {})
+    metrics  = raw.get("publicMetrics", {})
+    tweet_id = raw.get("id", "")
+    username = author.get("userName", "unknown")
+    url      = raw.get("url", "") or f"https://x.com/{username}/status/{tweet_id}"
+
+    return {
+        "link": url,
+        "text": raw.get("text", ""),
+        "user": {"username": username},
+        "stats": {
+            "likes":    metrics.get("likeCount", 0),
+            "retweets": metrics.get("retweetCount", 0),
+        },
+    }
 
 def _scrape_blocking(query: str, count: int) -> list:
-    """Runs in a thread — Nitter is synchronous."""
-    scraper = Nitter(log_level=0, skip_instance_check=True)
-    results = scraper.get_tweets(query, mode="term", number=count)
-    if not results:
+    """
+    Calls the twitterapi.io advanced search endpoint synchronously.
+    Runs inside a thread so it doesn't block the event loop.
+    """
+    if not TWITTERAPI_KEY:
+        log.error("TWITTERAPI_KEY not set — cannot scrape.")
         return []
-    return results.get("tweets", []) or []
+
+    headers = {
+        "X-API-Key": TWITTERAPI_KEY,
+        "Content-Type": "application/json",
+    }
+
+    params = {
+        "query":    query,
+        "queryType": "Latest",   # "Latest" | "Top"
+        "count":    min(count, 100),
+    }
+
+    try:
+        resp = requests.get(
+            TWITTERAPI_BASE,
+            headers=headers,
+            params=params,
+            timeout=SCRAPE_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw_tweets = data.get("tweets", []) or []
+        return [_normalize_tweet(t) for t in raw_tweets]
+    except requests.exceptions.Timeout:
+        log.warning(f"twitterapi.io timeout for query: '{query}'")
+        return []
+    except requests.exceptions.HTTPError as e:
+        log.warning(f"twitterapi.io HTTP error '{query}': {e} — {resp.text[:200]}")
+        return []
+    except Exception as e:
+        log.warning(f"twitterapi.io error '{query}': {e}")
+        return []
 
 async def scrape_tweets(query: str, count: int = 30) -> list:
     loop = asyncio.get_event_loop()
     try:
         tweets = await asyncio.wait_for(
             loop.run_in_executor(None, _scrape_blocking, query, count),
-            timeout=SCRAPE_TIMEOUT,
+            timeout=SCRAPE_TIMEOUT + 5,
         )
         return tweets
     except asyncio.TimeoutError:
-        log.warning(f"Scrape timeout ({SCRAPE_TIMEOUT}s) for query: '{query}' — skipping")
+        log.warning(f"Async timeout for query: '{query}' — skipping")
         return []
     except Exception as e:
         log.warning(f"Scrape error '{query}': {e}")
@@ -356,12 +414,11 @@ async def do_scan(app, progress_chat_id: str = None):
 
             score, reasons = score_tweet(text, contest_type)
 
-            # Bonus point: tweet came from a contest-specific search query,
-            # so it already has implicit relevance even if keyword scoring is low
+            # Bonus point: tweet came from a contest-specific search query
             score += 1
             reasons.insert(0, f"matched search: {query}")
 
-            if score < 2:  # lowered from 3 — 1 base bonus + 1 signal is enough
+            if score < 2:
                 continue
 
             log.info(f"   🎯 @{username} | score={score} | {likes}❤ {retweets}🔁")
@@ -381,7 +438,7 @@ async def do_scan(app, progress_chat_id: str = None):
         if batch_found == 0:
             log.info("   No qualifying contests in results.")
 
-        await asyncio.sleep(1)  # reduced from 3s — just enough to be polite to Nitter
+        await asyncio.sleep(1)
 
     last_scan_time = datetime.now().strftime("%d %b %Y · %H:%M")
     save_seen(seen_tweets)
@@ -585,7 +642,7 @@ async def cmd_autoscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async def perpetual_loop():
         app = context.application
-        COOLDOWN = 60  # seconds between scan cycles to avoid hammering Nitter
+        COOLDOWN = 60  # seconds between scan cycles
         while True:
             try:
                 await do_scan(app)
@@ -623,8 +680,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Runs a single test query and dumps everything Nitter returns — raw tweet
-    text, stats, link, and score — so you can see exactly why tweets are
+    Runs a single test query and dumps everything twitterapi.io returns — raw
+    tweet text, stats, link, and score — so you can see exactly why tweets are
     passing or failing.
 
     Usage:
@@ -632,10 +689,10 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         /debug art contest   → uses custom query
     """
     query = " ".join(context.args) if context.args else "meme contest prize"
-    contest_type = "meme"  # used for scoring context
+    contest_type = "meme"
 
     await update.message.reply_text(
-        f"🧪 *Debug scrape:* `{query}`\nFetching up to 5 tweets from Nitter...",
+        f"🧪 *Debug scrape:* `{query}`\nFetching up to 5 tweets from twitterapi.io...",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -645,9 +702,9 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *No tweets returned.*\n\n"
             "Possible causes:\n"
-            "• All Nitter instances are down or rate-limiting\n"
+            "• TWITTERAPI_KEY not set or invalid\n"
             "• Query returned zero results on X\n"
-            "• Scrape timed out (check contest_bot.log for details)",
+            "• Network error (check contest_bot.log for details)",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -667,7 +724,6 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         score += 1  # query-match bonus
         reasons_str = ", ".join(reasons[:4]) or "none"
 
-        # Truncate tweet text so Telegram doesn't reject the message
         preview = raw_text[:200].replace("*", "").replace("_", "").replace("`", "")
 
         msg = (
@@ -686,11 +742,9 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         await asyncio.sleep(0.3)
 
-# ── Scheduled Scan Loop (uses PTB's built-in JobQueue — no threading conflicts) ─
+# ── Scheduled Scan Loop ───────────────────────────────────────────────────────
 def start_scheduler(app):
-    # Run first scan immediately on startup (30s delay to let bot settle)
     app.job_queue.run_once(lambda ctx: asyncio.ensure_future(do_scan(app)), when=30)
-    # Then repeat every CHECK_INTERVAL minutes
     app.job_queue.run_repeating(
         lambda ctx: asyncio.ensure_future(do_scan(app)),
         interval=CHECK_INTERVAL * 60,
@@ -704,15 +758,19 @@ def main():
         log.error("TELEGRAM_BOT_TOKEN not set in .env — exiting.")
         return
 
+    if not TWITTERAPI_KEY:
+        log.error("TWITTERAPI_KEY not set in .env — exiting.")
+        return
+
     log.info("╔══════════════════════════════════════╗")
     log.info("║   CONTEST HUNTER BOT (INTERACTIVE)   ║")
+    log.info("║   Backend: twitterapi.io              ║")
     log.info("╚══════════════════════════════════════╝")
     log.info(f"  Scan interval : every {CHECK_INTERVAL} min")
     log.info(f"  Subscribers   : {len(subscribers)} loaded\n")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Register commands
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("stop",       cmd_stop))
     app.add_handler(CommandHandler("status",     cmd_status))
@@ -723,7 +781,6 @@ def main():
     app.add_handler(CommandHandler("help",       cmd_help))
     app.add_handler(CommandHandler("debug",      cmd_debug))
 
-    # Set command menu visible in Telegram UI
     async def post_init(application):
         await application.bot.set_my_commands([
             BotCommand("start",      "Subscribe to contest alerts"),
@@ -735,7 +792,6 @@ def main():
             BotCommand("autoscan",   "Toggle perpetual scan loop on/off"),
             BotCommand("help",       "Show all commands"),
         ])
-        # Start background scan scheduler
         start_scheduler(application)
 
     app.post_init = post_init
