@@ -119,23 +119,25 @@ last_scan_time: str = "Never"
 autoscan_tasks: dict = {}  # chat_id -> asyncio.Task
 
 # ── Search Targets ────────────────────────────────────────────────────────────
+# Merged OR queries: 4 API calls instead of 16 — 75% fewer credits used.
+# twitterapi.io supports Twitter's native OR operator natively.
 SEARCH_TARGETS = [
-    ("meme contest prize",          "meme"),
-    ("meme competition win",        "meme"),
-    ("meme battle giveaway",        "meme"),
-    ("best meme win prize",         "meme"),
-    ("art contest prize",           "art"),
-    ("art competition submit",      "art"),
-    ("fan art contest winner",      "art"),
-    ("drawing contest prize",       "art"),
-    ("illustration contest win",    "art"),
-    ("design contest giveaway",     "art"),
-    ("video contest prize",         "video"),
-    ("video competition win",       "video"),
-    ("short video contest submit",  "video"),
-    ("video challenge prize pool",  "video"),
-    ("reel contest giveaway",       "video"),
-    ("tiktok contest prize",        "video"),
+    (
+        "(meme contest OR meme competition OR meme battle OR best meme) (prize OR win OR giveaway)",
+        "meme",
+    ),
+    (
+        "(art contest OR art competition OR fan art contest OR drawing contest OR illustration contest OR design contest) (prize OR win OR submit OR giveaway)",
+        "art",
+    ),
+    (
+        "(video contest OR video competition OR reel contest OR tiktok contest OR short video contest) (prize OR win OR submit OR giveaway)",
+        "video",
+    ),
+    (
+        "(enter to win OR prize pool OR contest ends OR submit your entry OR winner announced) (meme OR art OR video OR creative OR design)",
+        "art",
+    ),
 ]
 
 # ── Contest Detection ─────────────────────────────────────────────────────────
@@ -358,24 +360,55 @@ async def broadcast_alert(app, tweet: dict, reasons: list, contest_type: str, li
         log.info(f"  📤 Alert sent to {sent_count} subscriber(s)")
 
 # ── Core Scan Logic ───────────────────────────────────────────────────────────
-async def do_scan(app, progress_chat_id: str = None):
-    """
-    Scan all search targets and broadcast alerts as they are found.
+async def scan_one_query(app, query: str, contest_type: str) -> int:
+    """Run a single query, score results, broadcast matches. Returns count found."""
+    tweets = await scrape_tweets(query, count=50)
+    found = 0
 
-    progress_chat_id — if set, sends live progress pings to that chat so the
-    user sees results the moment each query finishes instead of waiting for the
-    full scan to complete.
+    for tweet in tweets:
+        tweet_id = tweet.get("link", "")
+        if not tweet_id or tweet_id in seen_tweets:
+            continue
+
+        seen_tweets.add(tweet_id)
+
+        text     = tweet.get("text", "")
+        likes    = tweet.get("stats", {}).get("likes", 0)
+        retweets = tweet.get("stats", {}).get("retweets", 0)
+        username = tweet.get("user", {}).get("username", "?")
+
+        # Auto-detect contest type from tweet text for cross-type query
+        detected_type = contest_type
+        lower = text.lower()
+        if contest_type == "art" and ("meme" in lower or "meme contest" in lower):
+            detected_type = "meme"
+        elif contest_type == "art" and ("video" in lower or "reel" in lower or "tiktok" in lower):
+            detected_type = "video"
+
+        score, reasons = score_tweet(text, detected_type)
+        score += 1  # bonus: came from a targeted search
+        reasons.insert(0, f"matched search: {detected_type}")
+
+        if score < 2:
+            continue
+
+        log.info(f"   🎯 [{detected_type.upper()}] @{username} | score={score} | {likes}❤ {retweets}🔁")
+        found += 1
+        await broadcast_alert(app, tweet, reasons, detected_type, likes, retweets)
+
+    return found
+
+
+async def do_scan(app, progress_chat_id: str = None) -> int:
+    """
+    Run all 4 search queries concurrently. Returns total contests found.
     """
     global last_scan_time
     log.info(f"\n{'─'*50}")
-    log.info(f"⏰ Scan at {datetime.now().strftime('%H:%M:%S')}")
+    log.info(f"⏰ Scan at {datetime.now().strftime('%H:%M:%S')} — {len(SEARCH_TARGETS)} queries (concurrent)")
     log.info(f"{'─'*50}")
 
-    found = 0
-    total = len(SEARCH_TARGETS)
-
-    async def ping(text: str):
-        """Send a live status message to the requesting user (best-effort)."""
+    async def notify(text: str):
         if not progress_chat_id:
             return
         try:
@@ -386,63 +419,26 @@ async def do_scan(app, progress_chat_id: str = None):
                 disable_web_page_preview=True,
             )
         except Exception as e:
-            log.warning(f"Progress ping failed: {e}")
+            log.warning(f"Notify failed: {e}")
 
-    for idx, (query, contest_type) in enumerate(SEARCH_TARGETS, start=1):
-        log.info(f"🔍 [{contest_type.upper()}] \"{query}\"")
-        await ping(f"🔍 `[{idx}/{total}]` Checking *{contest_type}* — _{query}_")
+    # Run all queries simultaneously — total time = slowest query, not sum
+    tasks = [scan_one_query(app, query, ct) for query, ct in SEARCH_TARGETS]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        tweets = await scrape_tweets(query, count=30)
-
-        if not tweets:
-            log.info("   No results.")
-            await asyncio.sleep(1)
-            continue
-
-        batch_found = 0
-        for tweet in tweets:
-            tweet_id = tweet.get("link", "")
-            if not tweet_id or tweet_id in seen_tweets:
-                continue
-
-            seen_tweets.add(tweet_id)
-
-            text     = tweet.get("text", "")
-            likes    = tweet.get("stats", {}).get("likes", 0)
-            retweets = tweet.get("stats", {}).get("retweets", 0)
-            username = tweet.get("user", {}).get("username", "?")
-
-            score, reasons = score_tweet(text, contest_type)
-
-            # Bonus point: tweet came from a contest-specific search query
-            score += 1
-            reasons.insert(0, f"matched search: {query}")
-
-            if score < 2:
-                continue
-
-            log.info(f"   🎯 @{username} | score={score} | {likes}❤ {retweets}🔁")
-            found += 1
-            batch_found += 1
-
-            # Fire a live link ping to the /scan caller immediately
-            await ping(
-                f"🎯 *Found a {contest_type} contest!*\n"
-                f"👤 @{username} · ❤️ {likes} · 🔁 {retweets}\n"
-                f"🔗 {tweet_id}"
-            )
-
-            await broadcast_alert(app, tweet, reasons, contest_type, likes, retweets)
-            await asyncio.sleep(0.5)
-
-        if batch_found == 0:
-            log.info("   No qualifying contests in results.")
-
-        await asyncio.sleep(1)
+    found = sum(r for r in results if isinstance(r, int))
 
     last_scan_time = datetime.now().strftime("%d %b %Y · %H:%M")
     save_seen(seen_tweets)
     log.info(f"✅ Scan done. {found} contest(s) found.\n")
+
+    if progress_chat_id:
+        msg = (
+            f"✅ *Scan complete* — *{found}* new contest(s) found and alerted\\."
+            if found else
+            "✅ *Scan complete* — no new contests this round\\."
+        )
+        await notify(msg)
+
     return found
 
 # ── Telegram Command Handlers ─────────────────────────────────────────────────
@@ -603,16 +599,10 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🔍 *Scan started\\!*\n\n"
-        "I'll send you a status ping for each query — any contests found will "
-        "arrive immediately as they're spotted, without waiting for the full scan to finish\\.",
+        "🔍 Scanning X now\\.\\.\\. any contests found will arrive immediately\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
-    found = await do_scan(context.application, progress_chat_id=chat_id)
-    await update.message.reply_text(
-        f"✅ Scan complete\\. *{found}* new contest(s) found and alerted\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
+    await do_scan(context.application, progress_chat_id=chat_id)
 
 
 async def cmd_autoscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -642,15 +632,19 @@ async def cmd_autoscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async def perpetual_loop():
         app = context.application
-        COOLDOWN = 60  # seconds between scan cycles
+        COOLDOWN_ACTIVE = 120   # 2 min when contests found — keep scanning fast
+        COOLDOWN_IDLE   = 300   # 5 min when idle — saves credits
         while True:
             try:
-                await do_scan(app)
+                found = await do_scan(app)
+                cooldown = COOLDOWN_ACTIVE if found else COOLDOWN_IDLE
+                log.info(f"\u267e Autoscan sleeping {cooldown}s (found={found})")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.warning(f"Autoscan loop error: {e}")
-            await asyncio.sleep(COOLDOWN)
+                cooldown = COOLDOWN_IDLE
+            await asyncio.sleep(cooldown)
 
     task = asyncio.create_task(perpetual_loop())
     autoscan_tasks[chat_id] = task
