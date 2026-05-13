@@ -355,15 +355,28 @@ async def do_scan(app, progress_chat_id: str = None):
             username = tweet.get("user", {}).get("username", "?")
 
             score, reasons = score_tweet(text, contest_type)
-            if score < 3:
+
+            # Bonus point: tweet came from a contest-specific search query,
+            # so it already has implicit relevance even if keyword scoring is low
+            score += 1
+            reasons.insert(0, f"matched search: {query}")
+
+            if score < 2:  # lowered from 3 — 1 base bonus + 1 signal is enough
                 continue
 
             log.info(f"   🎯 @{username} | score={score} | {likes}❤ {retweets}🔁")
             found += 1
             batch_found += 1
 
+            # Fire a live link ping to the /scan caller immediately
+            await ping(
+                f"🎯 *Found a {contest_type} contest!*\n"
+                f"👤 @{username} · ❤️ {likes} · 🔁 {retweets}\n"
+                f"🔗 {tweet_id}"
+            )
+
             await broadcast_alert(app, tweet, reasons, contest_type, likes, retweets)
-            await asyncio.sleep(0.5)  # brief pause between sends, not between queries
+            await asyncio.sleep(0.5)
 
         if batch_found == 0:
             log.info("   No qualifying contests in results.")
