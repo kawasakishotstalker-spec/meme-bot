@@ -20,7 +20,7 @@ SETUP:
     pip install ntscraper python-telegram-bot python-dotenv schedule
 
 .env file:
-    TELEGRAM_BOT_TOKEN=your_bot_token
+    TELEGRAM_BOT_TOKEN=8883003786:AAFOTbzX_keof_UE6aW4jG0sPom28UTTVik
     CHECK_INTERVAL=20
 """
 
