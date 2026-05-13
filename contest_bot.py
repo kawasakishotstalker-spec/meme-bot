@@ -20,18 +20,15 @@ SETUP:
     pip install ntscraper python-telegram-bot python-dotenv schedule
 
 .env file:
-    TELEGRAM_BOT_TOKEN=8883003786:AAFOTbzX_keof_UE6aW4jG0sPom28UTTVik
+    TELEGRAM_BOT_TOKEN=your_bot_token
     CHECK_INTERVAL=20
 """
 
 import os
 import re
 import json
-import time
 import logging
-import schedule
 import asyncio
-import threading
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -216,9 +213,11 @@ def score_tweet(text: str, contest_type: str) -> tuple:
 # ── Scraper ───────────────────────────────────────────────────────────────────
 def scrape_tweets(query: str, count: int = 30) -> list:
     try:
-        scraper = Nitter(log_level=0, skip_instance_check=False)
+        scraper = Nitter(log_level=0, skip_instance_check=True)
         results = scraper.get_tweets(query, mode="term", number=count)
-        return results.get("tweets", [])
+        if not results:
+            return []
+        return results.get("tweets", []) or []
     except Exception as e:
         log.warning(f"Scrape error '{query}': {e}")
         return []
@@ -511,27 +510,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
     )
 
-# ── Scheduled Scan Loop (runs in background thread) ──────────────────────────
+# ── Scheduled Scan Loop (uses PTB's built-in JobQueue — no threading conflicts) ─
 def start_scheduler(app):
-    async def scheduled_scan():
-        await do_scan(app)
-
-    def run_schedule():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        def job():
-            loop.run_until_complete(scheduled_scan())
-
-        schedule.every(CHECK_INTERVAL).minutes.do(job)
-        log.info(f"⏰ Scheduler started — scanning every {CHECK_INTERVAL} minutes.")
-
-        while True:
-            schedule.run_pending()
-            time.sleep(30)
-
-    thread = threading.Thread(target=run_schedule, daemon=True)
-    thread.start()
+    # Run first scan immediately on startup (30s delay to let bot settle)
+    app.job_queue.run_once(lambda ctx: asyncio.ensure_future(do_scan(app)), when=30)
+    # Then repeat every CHECK_INTERVAL minutes
+    app.job_queue.run_repeating(
+        lambda ctx: asyncio.ensure_future(do_scan(app)),
+        interval=CHECK_INTERVAL * 60,
+        first=CHECK_INTERVAL * 60,
+    )
+    log.info(f"⏰ Scheduler started — first scan in 30s, then every {CHECK_INTERVAL} minutes.")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
