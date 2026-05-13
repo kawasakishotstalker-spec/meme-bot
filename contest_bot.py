@@ -614,10 +614,77 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/threshold 30 10* — Set max likes / retweets\n"
         "*/scan* — Run an instant one-time scan now\n"
         "*/autoscan* — Toggle perpetual scan loop on/off ♾\n"
+        "*/debug* — Test one query and dump raw results\n"
         "*/help* — Show this message\n\n"
         "💡 _Tip: Use /autoscan to never miss a contest — it scans X non-stop._",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Runs a single test query and dumps everything Nitter returns — raw tweet
+    text, stats, link, and score — so you can see exactly why tweets are
+    passing or failing.
+
+    Usage:
+        /debug               → uses default query "meme contest prize"
+        /debug art contest   → uses custom query
+    """
+    query = " ".join(context.args) if context.args else "meme contest prize"
+    contest_type = "meme"  # used for scoring context
+
+    await update.message.reply_text(
+        f"🧪 *Debug scrape:* `{query}`\nFetching up to 5 tweets from Nitter...",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    tweets = await scrape_tweets(query, count=5)
+
+    if not tweets:
+        await update.message.reply_text(
+            "❌ *No tweets returned.*\n\n"
+            "Possible causes:\n"
+            "• All Nitter instances are down or rate-limiting\n"
+            "• Query returned zero results on X\n"
+            "• Scrape timed out (check contest_bot.log for details)",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    await update.message.reply_text(
+        f"✅ Got *{len(tweets)}* tweet(s). Showing details below:",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    for i, tweet in enumerate(tweets, start=1):
+        raw_text = tweet.get("text", "(no text)") or "(no text)"
+        link     = tweet.get("link", "(no link)") or "(no link)"
+        likes    = tweet.get("stats", {}).get("likes", "?")
+        retweets = tweet.get("stats", {}).get("retweets", "?")
+        username = tweet.get("user", {}).get("username", "?")
+        score, reasons = score_tweet(raw_text, contest_type)
+        score += 1  # query-match bonus
+        reasons_str = ", ".join(reasons[:4]) or "none"
+
+        # Truncate tweet text so Telegram doesn't reject the message
+        preview = raw_text[:200].replace("*", "").replace("_", "").replace("`", "")
+
+        msg = (
+            f"*[{i}/{len(tweets)}]* @{username}\n"
+            f"❤️ {likes}  🔁 {retweets}\n"
+            f"Score: {score}  |  Reasons: {reasons_str}\n"
+            f"Link: {link}\n\n"
+            f"_{preview}_"
+        )
+        try:
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN,
+                                            disable_web_page_preview=True)
+        except Exception as e:
+            await update.message.reply_text(
+                f"[{i}] @{username} — could not render (parse error: {e})\nLink: {link}"
+            )
+        await asyncio.sleep(0.3)
 
 # ── Scheduled Scan Loop (uses PTB's built-in JobQueue — no threading conflicts) ─
 def start_scheduler(app):
@@ -654,6 +721,7 @@ def main():
     app.add_handler(CommandHandler("scan",       cmd_scan))
     app.add_handler(CommandHandler("autoscan",   cmd_autoscan))
     app.add_handler(CommandHandler("help",       cmd_help))
+    app.add_handler(CommandHandler("debug",      cmd_debug))
 
     # Set command menu visible in Telegram UI
     async def post_init(application):
