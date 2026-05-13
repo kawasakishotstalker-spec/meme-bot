@@ -1,3 +1,4 @@
 twscrape
+requests
 python-telegram-bot[job-queue]==21.5
 python-dotenv==1.0.1
