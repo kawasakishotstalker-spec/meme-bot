@@ -13,7 +13,8 @@ USER COMMANDS:
     /setfilter video    → Only get video contest alerts
     /setfilter all      → Get all contest types (default)
     /threshold 30 10    → Set max likes / max retweets
-    /scan               → Trigger an instant manual scan
+    /scan               → Trigger an instant one-time scan
+    /autoscan           → Toggle perpetual scan loop on/off
     /help               → Show all commands
 
 SETUP:
@@ -115,6 +116,9 @@ seen_tweets: set = load_seen()
 
 # Track last scan time globally
 last_scan_time: str = "Never"
+
+# Autoscan state — tracks the running loop task per chat
+autoscan_tasks: dict = {}  # chat_id -> asyncio.Task
 
 # ── Search Targets ────────────────────────────────────────────────────────────
 SEARCH_TARGETS = [
@@ -484,12 +488,54 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Send /start first to activate alerts.")
         return
 
-    await update.message.reply_text("🔍 Running a manual scan now... hang tight!")
+    await update.message.reply_text("🔍 Running a scan now... hang tight!")
     found = await do_scan(context.application)
     await update.message.reply_text(
         f"✅ Scan complete\\. *{found}* new contest(s) found and alerted\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+
+
+async def cmd_autoscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+
+    if chat_id not in subscribers or not subscribers[chat_id].get("active"):
+        await update.message.reply_text("Send /start first to activate alerts.")
+        return
+
+    # If already running — stop it
+    if chat_id in autoscan_tasks and not autoscan_tasks[chat_id].done():
+        autoscan_tasks[chat_id].cancel()
+        del autoscan_tasks[chat_id]
+        await update.message.reply_text(
+            "⏹ *Autoscan stopped.*\n\nSend /autoscan again to restart\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    # Start perpetual scan loop
+    await update.message.reply_text(
+        "♾ *Autoscan started\\!*\n\n"
+        "I'll scan X continuously and alert you the moment a new contest appears\\.\n"
+        "Send /autoscan again to stop\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+    async def perpetual_loop():
+        app = context.application
+        COOLDOWN = 60  # seconds between scan cycles to avoid hammering Nitter
+        while True:
+            try:
+                await do_scan(app)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.warning(f"Autoscan loop error: {e}")
+            await asyncio.sleep(COOLDOWN)
+
+    task = asyncio.create_task(perpetual_loop())
+    autoscan_tasks[chat_id] = task
+    log.info(f"♾ Autoscan started for {chat_id}")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -504,9 +550,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/setfilter art* — Art contests only 🎨\n"
         "*/setfilter video* — Video contests only 🎬\n\n"
         "*/threshold 30 10* — Set max likes / retweets\n"
-        "*/scan* — Trigger an instant scan now\n"
+        "*/scan* — Run an instant one-time scan now\n"
+        "*/autoscan* — Toggle perpetual scan loop on/off ♾\n"
         "*/help* — Show this message\n\n"
-        "💡 _Tip: Lower your threshold to get only the freshest, least-competitive contests._",
+        "💡 _Tip: Use /autoscan to never miss a contest — it scans X non-stop._",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -543,6 +590,7 @@ def main():
     app.add_handler(CommandHandler("setfilter",  cmd_setfilter))
     app.add_handler(CommandHandler("threshold",  cmd_threshold))
     app.add_handler(CommandHandler("scan",       cmd_scan))
+    app.add_handler(CommandHandler("autoscan",   cmd_autoscan))
     app.add_handler(CommandHandler("help",       cmd_help))
 
     # Set command menu visible in Telegram UI
@@ -553,7 +601,8 @@ def main():
             BotCommand("status",     "Your settings and last scan time"),
             BotCommand("setfilter",  "Filter by type: all | meme | art | video"),
             BotCommand("threshold",  "Set max likes/retweets e.g. /threshold 30 10"),
-            BotCommand("scan",       "Run an instant manual scan"),
+            BotCommand("scan",       "Run an instant one-time scan"),
+            BotCommand("autoscan",   "Toggle perpetual scan loop on/off"),
             BotCommand("help",       "Show all commands"),
         ])
         # Start background scan scheduler
