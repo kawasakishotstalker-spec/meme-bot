@@ -215,13 +215,27 @@ def score_tweet(text: str, contest_type: str) -> tuple:
     return score, reasons
 
 # ── Scraper ───────────────────────────────────────────────────────────────────
-def scrape_tweets(query: str, count: int = 30) -> list:
+SCRAPE_TIMEOUT = 10  # seconds per query before giving up on a slow/dead Nitter instance
+
+def _scrape_blocking(query: str, count: int) -> list:
+    """Runs in a thread — Nitter is synchronous."""
+    scraper = Nitter(log_level=0, skip_instance_check=True)
+    results = scraper.get_tweets(query, mode="term", number=count)
+    if not results:
+        return []
+    return results.get("tweets", []) or []
+
+async def scrape_tweets(query: str, count: int = 30) -> list:
+    loop = asyncio.get_event_loop()
     try:
-        scraper = Nitter(log_level=0, skip_instance_check=True)
-        results = scraper.get_tweets(query, mode="term", number=count)
-        if not results:
-            return []
-        return results.get("tweets", []) or []
+        tweets = await asyncio.wait_for(
+            loop.run_in_executor(None, _scrape_blocking, query, count),
+            timeout=SCRAPE_TIMEOUT,
+        )
+        return tweets
+    except asyncio.TimeoutError:
+        log.warning(f"Scrape timeout ({SCRAPE_TIMEOUT}s) for query: '{query}' — skipping")
+        return []
     except Exception as e:
         log.warning(f"Scrape error '{query}': {e}")
         return []
@@ -286,22 +300,48 @@ async def broadcast_alert(app, tweet: dict, reasons: list, contest_type: str, li
         log.info(f"  📤 Alert sent to {sent_count} subscriber(s)")
 
 # ── Core Scan Logic ───────────────────────────────────────────────────────────
-async def do_scan(app):
+async def do_scan(app, progress_chat_id: str = None):
+    """
+    Scan all search targets and broadcast alerts as they are found.
+
+    progress_chat_id — if set, sends live progress pings to that chat so the
+    user sees results the moment each query finishes instead of waiting for the
+    full scan to complete.
+    """
     global last_scan_time
     log.info(f"\n{'─'*50}")
     log.info(f"⏰ Scan at {datetime.now().strftime('%H:%M:%S')}")
     log.info(f"{'─'*50}")
 
     found = 0
+    total = len(SEARCH_TARGETS)
 
-    for query, contest_type in SEARCH_TARGETS:
+    async def ping(text: str):
+        """Send a live status message to the requesting user (best-effort)."""
+        if not progress_chat_id:
+            return
+        try:
+            await app.bot.send_message(
+                chat_id=int(progress_chat_id),
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.warning(f"Progress ping failed: {e}")
+
+    for idx, (query, contest_type) in enumerate(SEARCH_TARGETS, start=1):
         log.info(f"🔍 [{contest_type.upper()}] \"{query}\"")
-        tweets = scrape_tweets(query, count=30)
+        await ping(f"🔍 `[{idx}/{total}]` Checking *{contest_type}* — _{query}_")
+
+        tweets = await scrape_tweets(query, count=30)
 
         if not tweets:
             log.info("   No results.")
+            await asyncio.sleep(1)
             continue
 
+        batch_found = 0
         for tweet in tweets:
             tweet_id = tweet.get("link", "")
             if not tweet_id or tweet_id in seen_tweets:
@@ -320,11 +360,15 @@ async def do_scan(app):
 
             log.info(f"   🎯 @{username} | score={score} | {likes}❤ {retweets}🔁")
             found += 1
+            batch_found += 1
 
             await broadcast_alert(app, tweet, reasons, contest_type, likes, retweets)
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)  # brief pause between sends, not between queries
 
-        await asyncio.sleep(3)
+        if batch_found == 0:
+            log.info("   No qualifying contests in results.")
+
+        await asyncio.sleep(1)  # reduced from 3s — just enough to be polite to Nitter
 
     last_scan_time = datetime.now().strftime("%d %b %Y · %H:%M")
     save_seen(seen_tweets)
@@ -488,8 +532,13 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Send /start first to activate alerts.")
         return
 
-    await update.message.reply_text("🔍 Running a scan now... hang tight!")
-    found = await do_scan(context.application)
+    await update.message.reply_text(
+        "🔍 *Scan started\\!*\n\n"
+        "I'll send you a status ping for each query — any contests found will "
+        "arrive immediately as they're spotted, without waiting for the full scan to finish\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+    found = await do_scan(context.application, progress_chat_id=chat_id)
     await update.message.reply_text(
         f"✅ Scan complete\\. *{found}* new contest(s) found and alerted\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
