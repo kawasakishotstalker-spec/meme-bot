@@ -40,7 +40,7 @@ import json
 import logging
 import asyncio
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 try:
@@ -342,7 +342,118 @@ async def scrape_tweets(query: str, count: int = 30) -> list:
         log.warning(f"Async error '{query}': {e}")
         return []
 
+
+# ── Recency: build a date-bounded query (last 7 days) ────────────────────────
+def build_recent_query(base_query: str, days_back: int = 7) -> str:
+    """Append since: / until: operators so the API returns only recent tweets."""
+    now   = datetime.now(timezone.utc)
+    since = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    until = (now + timedelta(days=1)).strftime("%Y-%m-%d")   # inclusive today
+    return f"{base_query} since:{since} until:{until}"
+
+
+# ── Deadline filter: skip contests ending in < MIN_DAYS_REMAINING ─────────────
+MIN_DAYS_REMAINING = 2   # contests must have at least this many days left
+
+# Patterns that signal how many days/hours remain
+_ENDS_IN_DAYS    = re.compile(
+    r"(?:ends?|closes?|deadline|last\s+day|expires?)\s+in\s+(\d+)\s*d(?:ays?)?",
+    re.IGNORECASE,
+)
+_ENDS_IN_HOURS   = re.compile(
+    r"(?:ends?|closes?|deadline|last\s+day|expires?)\s+in\s+(\d+)\s*h(?:ours?|rs?)?",
+    re.IGNORECASE,
+)
+_HOURS_LEFT      = re.compile(r"(\d+)\s*h(?:ours?|rs?)?\s+left", re.IGNORECASE)
+_DAYS_LEFT       = re.compile(r"(\d+)\s*d(?:ays?)?\s+left",      re.IGNORECASE)
+_ENDS_ON_DATE    = re.compile(
+    r"(?:ends?|closes?|deadline)\s*(?:on|:)?\s*"
+    r"(\d{1,2})[\s/\-](\w+)(?:[\s/\-](\d{2,4}))?",
+    re.IGNORECASE,
+)
+
+_MONTH_MAP = {
+    "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+    "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
+    "january":1,"february":2,"march":3,"april":4,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
+}
+
+def _days_until(dt: datetime) -> float:
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt - now).total_seconds() / 86_400
+
+
+def has_enough_time_remaining(text: str) -> bool:
+    """
+    Returns True if the contest appears to have >= MIN_DAYS_REMAINING days left,
+    OR if no deadline signal is found (we can't rule it out).
+    Returns False only when we can positively detect the deadline is < 2 days away.
+    """
+    lower = text.lower()
+
+    # "ends in X days"
+    m = _ENDS_IN_DAYS.search(lower)
+    if m:
+        days = int(m.group(1))
+        if days < MIN_DAYS_REMAINING:
+            log.debug(f"  ⏳ Skipped — only {days}d remaining.")
+            return False
+        return True
+
+    # "X days left"
+    m = _DAYS_LEFT.search(lower)
+    if m:
+        days = int(m.group(1))
+        if days < MIN_DAYS_REMAINING:
+            log.debug(f"  ⏳ Skipped — only {days}d left.")
+            return False
+        return True
+
+    # "ends in X hours" or "X hours left" → always < 1 day → skip
+    if _ENDS_IN_HOURS.search(lower) or _HOURS_LEFT.search(lower):
+        log.debug("  ⏳ Skipped — ends in hours.")
+        return False
+
+    # "ends on DD MonthName [YYYY]"
+    m = _ENDS_ON_DATE.search(text)
+    if m:
+        day_str, month_str, year_str = m.group(1), m.group(2).lower(), m.group(3)
+        month_num = _MONTH_MAP.get(month_str[:3])
+        if month_num:
+            year = int(year_str) if year_str else datetime.now(timezone.utc).year
+            try:
+                deadline = datetime(year, month_num, int(day_str), tzinfo=timezone.utc)
+                if _days_until(deadline) < MIN_DAYS_REMAINING:
+                    log.debug(f"  ⏳ Skipped — deadline {deadline.date()} is too soon.")
+                    return False
+            except ValueError:
+                pass   # bad date → let it through
+
+    # No recognisable deadline found → assume it's still open
+    return True
+
 # ── Alert Formatter ───────────────────────────────────────────────────────────
+def _deadline_summary(text: str) -> str:
+    """Return a short human-readable deadline line if detectable, else empty string."""
+    lower = text.lower()
+    m = _ENDS_IN_DAYS.search(lower)
+    if m:
+        return f"⏳ Ends in ~{m.group(1)} day(s)"
+    m = _DAYS_LEFT.search(lower)
+    if m:
+        return f"⏳ ~{m.group(1)} day(s) left"
+    if _ENDS_IN_HOURS.search(lower) or _HOURS_LEFT.search(lower):
+        return "⏳ Ending very soon (hours)"
+    m = _ENDS_ON_DATE.search(text)
+    if m:
+        day_str, month_str = m.group(1), m.group(2)
+        return f"⏳ Deadline: {day_str} {month_str.title()}"
+    return ""
+
+
 def format_alert(tweet: dict, reasons: list, category: str) -> str:
     likes     = tweet["stats"]["likes"]
     retweets  = tweet["stats"]["retweets"]
@@ -352,6 +463,7 @@ def format_alert(tweet: dict, reasons: list, category: str) -> str:
     timestamp = datetime.now().strftime("%d %b %Y · %H:%M")
     emoji     = CATEGORY_EMOJI.get(category, "🏆")
     reasons_str = "\n".join(f"  • {r}" for r in reasons[:4])
+    deadline_line = _deadline_summary(tweet["text"])
 
     return (
         f"{emoji} *CRYPTO {category.upper()} CONTEST*\n"
@@ -360,8 +472,9 @@ def format_alert(tweet: dict, reasons: list, category: str) -> str:
         f"❤️ {likes} likes   🔁 {retweets} retweets\n\n"
         f"📝 _{safe_text}_\n\n"
         f"🔍 *Why detected:*\n{reasons_str}\n\n"
-        f"🔗 [Open on X]({link})\n"
-        f"⏰ {timestamp}"
+        + (f"{deadline_line}\n\n" if deadline_line else "")
+        + f"🔗 [Open on X]({link})\n"
+        f"⏰ Found: {timestamp}"
     )
 
 # ── Broadcast ─────────────────────────────────────────────────────────────────
@@ -409,10 +522,11 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
             pass
 
     for idx, (query, category) in enumerate(SEARCH_TARGETS, 1):
-        log.info(f"🔍 [{category.upper()}] {query}")
+        recent_query = build_recent_query(query)   # last 7 days only
+        log.info(f"🔍 [{category.upper()}] {recent_query}")
         await ping(f"🔍 `[{idx}/{len(SEARCH_TARGETS)}]` *{category}* — _{query}_")
 
-        tweets = await scrape_tweets(query, count=30)
+        tweets = await scrape_tweets(recent_query, count=30)
         if not tweets:
             await asyncio.sleep(1)
             continue
@@ -422,6 +536,10 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
             if not link or link in seen_tweets:
                 continue
             seen_tweets.add(link)
+
+            # ── Skip contests ending in < 2 days ─────────────────────────
+            if not has_enough_time_remaining(tweet["text"]):
+                continue
 
             score, reasons = score_tweet(tweet["text"], category)
             score += 1
