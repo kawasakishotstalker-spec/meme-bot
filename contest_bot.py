@@ -2,30 +2,30 @@
 ╔══════════════════════════════════════════════════════════════╗
 ║        CONTEST HUNTER BOT — Interactive Telegram Version     ║
 ║   Scrapes Twitter/X → Alerts subscribers via Telegram        ║
-║   Backend: twscrape  (free, uses your X account)             ║
+║   Backend: twitterapi.io  (REST API, no login required)      ║
 ╚══════════════════════════════════════════════════════════════╝
 
 USER COMMANDS:
     /start              → Subscribe to contest alerts
     /stop               → Pause your alerts
     /status             → Check subscription + last scan info
-    /setfilter meme     → Only get meme contest alerts
-    /setfilter art      → Only get art contest alerts
-    /setfilter video    → Only get video contest alerts
+    /setfilter nft      → Only get NFT contest alerts
+    /setfilter memecoin → Only get meme coin contest alerts
+    /setfilter project  → Only get new project/airdrop alerts
+    /setfilter exchange → Only get trading competition alerts
     /setfilter all      → Get all contest types (default)
     /threshold 30 10    → Set max likes / max retweets
     /scan               → Trigger an instant one-time scan
     /autoscan           → Toggle perpetual scan loop on/off
+    /debug [query]      → Test a query and dump raw results
     /help               → Show all commands
 
 SETUP:
-    pip install twscrape python-telegram-bot python-dotenv
+    pip install -r requirements.txt
 
-.env file:
+Railway environment variables:
     TELEGRAM_BOT_TOKEN=your_bot_token
-    TWITTER_USERNAME=your_x_username
-    TWITTER_PASSWORD=your_x_password
-    TWITTER_EMAIL=your_x_email
+    TWITTERAPI_KEY=your_twitterapi_io_key
     CHECK_INTERVAL=20
 """
 
@@ -34,6 +34,7 @@ import re
 import json
 import logging
 import asyncio
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -44,13 +45,14 @@ try:
     )
     from telegram.constants import ParseMode
 except ImportError:
-    print("Run: pip install python-telegram-bot")
+    print("Run: pip install python-telegram-bot[job-queue]")
     exit(1)
 
 # ── Load Config ───────────────────────────────────────────────────────────────
 load_dotenv()
 
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TWITTERAPI_KEY  = os.getenv("TWITTERAPI_KEY", "")
 CHECK_INTERVAL  = int(os.getenv("CHECK_INTERVAL", 20))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -65,17 +67,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Subscriber Storage ────────────────────────────────────────────────────────
-# subscribers.json structure:
-# {
-#   "chat_id": {
-#     "active": true,
-#     "filter": "all",        ← "all" | "meme" | "art" | "video"
-#     "max_likes": 50,
-#     "max_retweets": 20,
-#     "joined": "2026-05-13T14:00:00"
-#   }
-# }
-
 SUBSCRIBERS_FILE = "subscribers.json"
 
 def load_subscribers() -> dict:
@@ -112,71 +103,87 @@ def save_seen(seen: set):
 
 seen_tweets: set = load_seen()
 
-# Track last scan time globally
 last_scan_time: str = "Never"
-
-# Autoscan state — tracks the running loop task per chat
 autoscan_tasks: dict = {}  # chat_id -> asyncio.Task
 
-# ── Search Targets ────────────────────────────────────────────────────────────
-# Merged OR queries: 4 API calls instead of 16 — 75% fewer credits used.
-# twitterapi.io supports Twitter's native OR operator natively.
+# ── Search Targets (Crypto-focused) ──────────────────────────────────────────
 SEARCH_TARGETS = [
-    (
-        "(meme contest OR meme competition OR meme battle OR best meme) (prize OR win OR giveaway)",
-        "meme",
-    ),
-    (
-        "(art contest OR art competition OR fan art contest OR drawing contest OR illustration contest OR design contest) (prize OR win OR submit OR giveaway)",
-        "art",
-    ),
-    (
-        "(video contest OR video competition OR reel contest OR tiktok contest OR short video contest) (prize OR win OR submit OR giveaway)",
-        "video",
-    ),
-    (
-        "(enter to win OR prize pool OR contest ends OR submit your entry OR winner announced) (meme OR art OR video OR creative OR design)",
-        "art",
-    ),
+    # NFT contests
+    ("NFT giveaway contest win",            "nft"),
+    ("NFT meme contest prize",              "nft"),
+    ("NFT art competition submit",          "nft"),
+    ("NFT whitelist giveaway",              "nft"),
+    ("NFT mint giveaway winner",            "nft"),
+    # Meme coin contests
+    ("memecoin meme contest prize",         "memecoin"),
+    ("meme coin competition giveaway",      "memecoin"),
+    ("crypto meme contest win",             "memecoin"),
+    ("best crypto meme prize pool",         "memecoin"),
+    ("memecoin community contest",          "memecoin"),
+    # New project / token launches
+    ("crypto airdrop contest submit",       "project"),
+    ("new token launch giveaway",           "project"),
+    ("DeFi project contest prize",          "project"),
+    ("crypto project competition win",      "project"),
+    ("web3 project giveaway contest",       "project"),
+    ("altcoin giveaway contest",            "project"),
+    # Exchange / trading competitions
+    ("crypto exchange trading contest",     "exchange"),
+    ("exchange trading competition prize",  "exchange"),
+    ("crypto trading challenge prize pool", "exchange"),
+    ("DEX trading competition win",         "exchange"),
+    ("futures trading contest prize",       "exchange"),
 ]
 
 # ── Contest Detection ─────────────────────────────────────────────────────────
 CONTEST_KEYWORDS = {
-    "meme": [
-        "meme contest", "meme competition", "best meme", "meme battle",
-        "meme challenge", "funniest meme", "submit your meme", "meme giveaway",
+    "nft": [
+        "nft giveaway", "nft contest", "nft competition", "nft whitelist",
+        "nft mint", "nft drop", "free nft", "nft winner", "nft art contest",
+        "nft meme contest", "allowlist giveaway", "nft raffle",
     ],
-    "art": [
-        "art contest", "art competition", "fan art contest", "drawing contest",
-        "illustration contest", "design contest", "submit your art",
-        "art submission", "art challenge", "creative contest",
+    "memecoin": [
+        "memecoin contest", "meme coin giveaway", "crypto meme contest",
+        "meme competition", "best crypto meme", "memecoin community contest",
+        "meme battle crypto", "funniest crypto meme", "coin meme challenge",
     ],
-    "video": [
-        "video contest", "video competition", "short video contest",
-        "video challenge", "reel contest", "tiktok contest",
-        "submit your video", "video submission", "film contest",
-        "clip contest", "content creator contest",
+    "project": [
+        "airdrop contest", "token giveaway", "defi contest", "web3 contest",
+        "crypto project giveaway", "new token contest", "altcoin giveaway",
+        "crypto launch contest", "testnet contest", "mainnet giveaway",
+        "protocol giveaway", "dao contest", "crypto community contest",
+    ],
+    "exchange": [
+        "trading contest", "trading competition", "trading challenge",
+        "exchange contest", "dex competition", "futures contest",
+        "spot trading contest", "trading prize pool", "pnl contest",
+        "crypto trading giveaway", "leaderboard prize",
     ],
 }
 
 COMMON_KEYWORDS = [
-    "enter to win", "prize pool", "winner announced", "voting open",
+    "enter to win", "prize pool", "winner announced", "winners selected",
     "submit entries", "contest open", "contest ends", "deadline to enter",
+    "voting open", "drop your wallet", "comment your wallet",
+    "retweet to enter", "follow and retweet", "tag a friend",
 ]
 
 PRIZE_PATTERNS = [
     r"\$[\d,]+",
-    r"\d+\.?\d*\s*(eth|sol|btc|usdt|bnb|usdc)",
+    r"\d+\.?\d*\s*(eth|sol|btc|usdt|bnb|usdc|matic|avax|arb|op|sui|apt|ton|pepe|shib|doge|wif|bonk)",
+    r"\d+\s*(nft|whitelist|wl\s*spot)",
     r"prize[s]?\s*[:=\-]",
     r"winner[s]?\s*(get|receive|will|takes?)",
     r"(like|retweet|follow)\s*(and|&|to)\s*(enter|win|participate)",
-    r"submission[s]?\s*(open|close|due|deadline)",
     r"(ends?|closes?)\s*(in|on)\s*\d+",
-    r"tag\s*(a\s*friend|someone)",
-    r"(reply|comment|dm)\s*(to\s*)?(enter|join|participate|submit)",
+    r"drop\s*(your|a)\s*wallet",
+    r"(reply|comment|dm)\s*(to\s*)?(enter|join|participate|submit|win)",
+    r"airdrop\s*(contest|giveaway|competition)",
+    r"(wl|whitelist)\s*(giveaway|contest|raffle|winner)",
+    r"(mint|minting)\s*(free|contest|giveaway)",
 ]
 
-EXCLUDE_KEYWORDS = ["sponsored", "#ad", "paid partnership", "advertisement"]
+EXCLUDE_KEYWORDS = ["sponsored", "#ad", "paid partnership", "advertisement", "buy now", "invest now"]
 
 def score_tweet(text: str, contest_type: str) -> tuple:
     lower = text.lower()
@@ -187,7 +194,6 @@ def score_tweet(text: str, contest_type: str) -> tuple:
         if exc in lower:
             return -1, [f"excluded: {exc}"]
 
-    # Type-specific keywords
     for kw in CONTEST_KEYWORDS.get(contest_type, []):
         if kw in lower:
             score += 1
@@ -195,7 +201,6 @@ def score_tweet(text: str, contest_type: str) -> tuple:
             if len(reasons) >= 2:
                 break
 
-    # Common keywords
     for kw in COMMON_KEYWORDS:
         if kw in lower:
             score += 1
@@ -203,7 +208,6 @@ def score_tweet(text: str, contest_type: str) -> tuple:
             if score >= 4:
                 break
 
-    # Prize / action patterns
     for pattern in PRIZE_PATTERNS:
         m = re.search(pattern, lower)
         if m:
@@ -214,69 +218,73 @@ def score_tweet(text: str, contest_type: str) -> tuple:
 
     return score, reasons
 
-# ── twscrape Backend (free, uses your X account session) ─────────────────────
-try:
-    from twscrape import API as TwscrapeAPI, gather
-except ImportError:
-    print("Run: pip install twscrape")
-    exit(1)
+# ── twitterapi.io Scraper ─────────────────────────────────────────────────────
+SCRAPE_TIMEOUT   = 15
+TWITTERAPI_BASE  = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 
-TWITTER_USERNAME = os.getenv("TWITTER_USERNAME", "")
-TWITTER_PASSWORD = os.getenv("TWITTER_PASSWORD", "")
-TWITTER_EMAIL    = os.getenv("TWITTER_EMAIL", "")
-
-# Shared twscrape API instance — initialised once at startup
-_twapi: TwscrapeAPI | None = None
-
-async def get_twapi() -> TwscrapeAPI:
-    """Return (and lazily initialise) the shared twscrape API instance."""
-    global _twapi
-    if _twapi is not None:
-        return _twapi
-
-    _twapi = TwscrapeAPI()
-    if not TWITTER_USERNAME or not TWITTER_PASSWORD or not TWITTER_EMAIL:
-        log.error("TWITTER_USERNAME / TWITTER_PASSWORD / TWITTER_EMAIL not set — cannot scrape.")
-        return _twapi
-
-    try:
-        await _twapi.pool.add_account(
-            TWITTER_USERNAME,
-            TWITTER_PASSWORD,
-            TWITTER_EMAIL,
-            TWITTER_PASSWORD,   # email password same as account password unless changed
-        )
-        await _twapi.pool.login_all()
-        log.info("✅ twscrape: logged in successfully.")
-    except Exception as e:
-        log.error(f"twscrape login failed: {e}")
-
-    return _twapi
-
-
-def _normalize_twscrape_tweet(t) -> dict:
-    """Convert a twscrape Tweet object into the internal dict shape."""
-    username = t.user.username if t.user else "unknown"
-    url      = f"https://x.com/{username}/status/{t.id}"
+def _normalize_tweet(raw: dict) -> dict:
+    author   = raw.get("author", {})
+    metrics  = raw.get("publicMetrics", {})
+    tweet_id = raw.get("id", "")
+    username = author.get("userName", "unknown")
+    url      = raw.get("url", "") or f"https://x.com/{username}/status/{tweet_id}"
     return {
-        "link":  url,
-        "text":  t.rawContent or "",
-        "user":  {"username": username},
+        "link": url,
+        "text": raw.get("text", ""),
+        "user": {"username": username},
         "stats": {
-            "likes":    t.likeCount    or 0,
-            "retweets": t.retweetCount or 0,
+            "likes":    metrics.get("likeCount", 0),
+            "retweets": metrics.get("retweetCount", 0),
         },
     }
 
-
-async def scrape_tweets(query: str, count: int = 50) -> list:
-    """Search X using twscrape and return normalised tweet dicts."""
-    api = await get_twapi()
+def _scrape_blocking(query: str, count: int) -> list:
+    if not TWITTERAPI_KEY:
+        log.error("TWITTERAPI_KEY not set — cannot scrape.")
+        return []
+    headers = {
+        "X-API-Key":    TWITTERAPI_KEY,
+        "Content-Type": "application/json",
+    }
+    params = {
+        "query":     query,
+        "queryType": "Latest",
+        "count":     min(count, 100),
+    }
     try:
-        raw = await gather(api.search(query, limit=count))
-        return [_normalize_twscrape_tweet(t) for t in raw]
+        resp = requests.get(
+            TWITTERAPI_BASE,
+            headers=headers,
+            params=params,
+            timeout=SCRAPE_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        raw_tweets = data.get("tweets", []) or []
+        return [_normalize_tweet(t) for t in raw_tweets]
+    except requests.exceptions.Timeout:
+        log.warning(f"twitterapi.io timeout for query: '{query}'")
+        return []
+    except requests.exceptions.HTTPError as e:
+        log.warning(f"twitterapi.io HTTP error '{query}': {e} — {resp.text[:200]}")
+        return []
     except Exception as e:
-        log.warning(f"twscrape search error '{query}': {e}")
+        log.warning(f"twitterapi.io error '{query}': {e}")
+        return []
+
+async def scrape_tweets(query: str, count: int = 30) -> list:
+    loop = asyncio.get_event_loop()
+    try:
+        tweets = await asyncio.wait_for(
+            loop.run_in_executor(None, _scrape_blocking, query, count),
+            timeout=SCRAPE_TIMEOUT + 5,
+        )
+        return tweets
+    except asyncio.TimeoutError:
+        log.warning(f"Async timeout for query: '{query}' — skipping")
+        return []
+    except Exception as e:
+        log.warning(f"Scrape error '{query}': {e}")
         return []
 
 # ── Format Alert Message ──────────────────────────────────────────────────────
@@ -288,23 +296,26 @@ def format_alert(tweet: dict, reasons: list, contest_type: str) -> str:
     link      = tweet.get("link", "")
     timestamp = datetime.now().strftime("%d %b %Y · %H:%M")
 
-    emoji_map = {"meme": "🐸", "art": "🎨", "video": "🎬"}
+    emoji_map = {"nft": "🖼", "memecoin": "🐸", "project": "🚀", "exchange": "📈"}
     emoji = emoji_map.get(contest_type, "🏆")
     label = contest_type.upper()
     reasons_str = "\n".join(f"  • {r}" for r in reasons[:4])
+
+    # Escape characters that break Telegram Markdown
+    safe_text = text.replace("*", "").replace("_", "").replace("`", "").replace("[", "").replace("]", "")
 
     return (
         f"{emoji} *{label} CONTEST — LOW ENGAGEMENT*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 @{username}\n"
         f"❤️ {likes} likes   🔁 {retweets} retweets\n\n"
-        f"📝 _{text}_\n\n"
+        f"📝 _{safe_text}_\n\n"
         f"🔍 *Detected via:*\n{reasons_str}\n\n"
         f"🔗 [Open Tweet]({link})\n"
         f"⏰ {timestamp}"
     )
 
-# ── Send to Eligible Subscribers ─────────────────────────────────────────────
+# ── Broadcast Alert ───────────────────────────────────────────────────────────
 async def broadcast_alert(app, tweet: dict, reasons: list, contest_type: str, likes: int, retweets: int):
     message = format_alert(tweet, reasons, contest_type)
     sent_count = 0
@@ -313,12 +324,10 @@ async def broadcast_alert(app, tweet: dict, reasons: list, contest_type: str, li
         if not prefs.get("active", False):
             continue
 
-        # Filter check
         user_filter = prefs.get("filter", "all")
         if user_filter != "all" and user_filter != contest_type:
             continue
 
-        # Per-user engagement threshold
         max_likes    = prefs.get("max_likes", 50)
         max_retweets = prefs.get("max_retweets", 20)
         if likes > max_likes or retweets > max_retweets:
@@ -339,55 +348,16 @@ async def broadcast_alert(app, tweet: dict, reasons: list, contest_type: str, li
         log.info(f"  📤 Alert sent to {sent_count} subscriber(s)")
 
 # ── Core Scan Logic ───────────────────────────────────────────────────────────
-async def scan_one_query(app, query: str, contest_type: str) -> int:
-    """Run a single query, score results, broadcast matches. Returns count found."""
-    tweets = await scrape_tweets(query, count=50)
-    found = 0
-
-    for tweet in tweets:
-        tweet_id = tweet.get("link", "")
-        if not tweet_id or tweet_id in seen_tweets:
-            continue
-
-        seen_tweets.add(tweet_id)
-
-        text     = tweet.get("text", "")
-        likes    = tweet.get("stats", {}).get("likes", 0)
-        retweets = tweet.get("stats", {}).get("retweets", 0)
-        username = tweet.get("user", {}).get("username", "?")
-
-        # Auto-detect contest type from tweet text for cross-type query
-        detected_type = contest_type
-        lower = text.lower()
-        if contest_type == "art" and ("meme" in lower or "meme contest" in lower):
-            detected_type = "meme"
-        elif contest_type == "art" and ("video" in lower or "reel" in lower or "tiktok" in lower):
-            detected_type = "video"
-
-        score, reasons = score_tweet(text, detected_type)
-        score += 1  # bonus: came from a targeted search
-        reasons.insert(0, f"matched search: {detected_type}")
-
-        if score < 2:
-            continue
-
-        log.info(f"   🎯 [{detected_type.upper()}] @{username} | score={score} | {likes}❤ {retweets}🔁")
-        found += 1
-        await broadcast_alert(app, tweet, reasons, detected_type, likes, retweets)
-
-    return found
-
-
 async def do_scan(app, progress_chat_id: str = None) -> int:
-    """
-    Run all 4 search queries concurrently. Returns total contests found.
-    """
     global last_scan_time
     log.info(f"\n{'─'*50}")
-    log.info(f"⏰ Scan at {datetime.now().strftime('%H:%M:%S')} — {len(SEARCH_TARGETS)} queries (concurrent)")
+    log.info(f"⏰ Scan at {datetime.now().strftime('%H:%M:%S')}")
     log.info(f"{'─'*50}")
 
-    async def notify(text: str):
+    found = 0
+    total = len(SEARCH_TARGETS)
+
+    async def ping(text: str):
         if not progress_chat_id:
             return
         try:
@@ -398,38 +368,67 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
                 disable_web_page_preview=True,
             )
         except Exception as e:
-            log.warning(f"Notify failed: {e}")
+            log.warning(f"Progress ping failed: {e}")
 
-    # Run all queries simultaneously — total time = slowest query, not sum
-    tasks = [scan_one_query(app, query, ct) for query, ct in SEARCH_TARGETS]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for idx, (query, contest_type) in enumerate(SEARCH_TARGETS, start=1):
+        log.info(f"🔍 [{contest_type.upper()}] \"{query}\"")
+        await ping(f"🔍 `[{idx}/{total}]` Checking *{contest_type}* — _{query}_")
 
-    found = sum(r for r in results if isinstance(r, int))
+        tweets = await scrape_tweets(query, count=30)
+
+        if not tweets:
+            log.info("   No results.")
+            await asyncio.sleep(1)
+            continue
+
+        batch_found = 0
+        for tweet in tweets:
+            tweet_id = tweet.get("link", "")
+            if not tweet_id or tweet_id in seen_tweets:
+                continue
+
+            seen_tweets.add(tweet_id)
+
+            text     = tweet.get("text", "")
+            likes    = tweet.get("stats", {}).get("likes", 0)
+            retweets = tweet.get("stats", {}).get("retweets", 0)
+            username = tweet.get("user", {}).get("username", "?")
+
+            score, reasons = score_tweet(text, contest_type)
+            score += 1
+            reasons.insert(0, f"matched search: {query}")
+
+            if score < 2:
+                continue
+
+            log.info(f"   🎯 @{username} | score={score} | {likes}❤ {retweets}🔁")
+            found += 1
+            batch_found += 1
+
+            await ping(
+                f"🎯 *Found a {contest_type} contest!*\n"
+                f"👤 @{username} · ❤️ {likes} · 🔁 {retweets}\n"
+                f"🔗 {tweet_id}"
+            )
+            await broadcast_alert(app, tweet, reasons, contest_type, likes, retweets)
+            await asyncio.sleep(0.5)
+
+        if batch_found == 0:
+            log.info("   No qualifying contests in results.")
+
+        await asyncio.sleep(1)
 
     last_scan_time = datetime.now().strftime("%d %b %Y · %H:%M")
     save_seen(seen_tweets)
     log.info(f"✅ Scan done. {found} contest(s) found.\n")
-
-    if progress_chat_id:
-        msg = (
-            f"✅ *Scan complete* — *{found}* new contest(s) found and alerted\\."
-            if found else
-            "✅ *Scan complete* — no new contests this round\\."
-        )
-        await notify(msg)
-
     return found
 
-# ── Telegram Command Handlers ─────────────────────────────────────────────────
-
+# ── Telegram Handlers ─────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
 
     if chat_id in subscribers and subscribers[chat_id].get("active"):
-        await update.message.reply_text(
-            "✅ You're already subscribed\\! Use /status to see your settings\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+        await update.message.reply_text("✅ You're already subscribed! Use /status to see your settings.")
         return
 
     subscribers[chat_id] = {
@@ -442,47 +441,40 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_subscribers(subscribers)
 
     await update.message.reply_text(
-        "🎯 *Contest Hunter activated\\!*\n\n"
-        "You'll get alerts when low\\-engagement meme, art, or video contests are spotted on X\\.\n\n"
+        "🎯 *Contest Hunter activated!*\n\n"
+        "You'll get alerts when low-engagement crypto contests are spotted on X.\n\n"
         "📌 *Default settings:*\n"
         "  • Filter: All contest types\n"
         "  • Max likes: 50\n"
         "  • Max retweets: 20\n\n"
-        "Use /help to see all commands\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        "Use /help to see all commands.",
+        parse_mode=ParseMode.MARKDOWN,
     )
     log.info(f"New subscriber: {chat_id}")
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     if chat_id not in subscribers or not subscribers[chat_id].get("active"):
         await update.message.reply_text("You're not subscribed. Send /start to activate alerts.")
         return
-
     subscribers[chat_id]["active"] = False
     save_subscribers(subscribers)
-    await update.message.reply_text(
-        "⏸ *Alerts paused.*\n\nSend /start anytime to reactivate\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
+    await update.message.reply_text("⏸ Alerts paused. Send /start anytime to reactivate.")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     prefs = subscribers.get(chat_id)
-
     if not prefs:
         await update.message.reply_text("You're not subscribed. Send /start to activate.")
         return
 
-    status_icon = "✅ Active" if prefs.get("active") else "⏸ Paused"
-    f = prefs.get("filter", "all").upper()
-    ml = prefs.get("max_likes", 50)
-    mr = prefs.get("max_retweets", 20)
-    joined = prefs.get("joined", "unknown")[:10]
-
+    status_icon  = "✅ Active" if prefs.get("active") else "⏸ Paused"
+    f            = prefs.get("filter", "all").upper()
+    ml           = prefs.get("max_likes", 50)
+    mr           = prefs.get("max_retweets", 20)
+    joined       = prefs.get("joined", "unknown")[:10]
     active_count = sum(1 for s in subscribers.values() if s.get("active"))
 
     await update.message.reply_text(
@@ -501,22 +493,22 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_setfilter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     if chat_id not in subscribers:
         await update.message.reply_text("Send /start first to activate alerts.")
         return
 
-    args = context.args
-    valid = ["all", "meme", "art", "video"]
+    valid = ["all", "nft", "memecoin", "project", "exchange"]
+    args  = context.args
 
     if not args or args[0].lower() not in valid:
         await update.message.reply_text(
             "Usage: `/setfilter <type>`\n\n"
             "Options:\n"
-            "  `all` — all contest types\n"
-            "  `meme` — meme contests only\n"
-            "  `art` — art contests only\n"
-            "  `video` — video contests only",
+            "  `all`      — all contest types\n"
+            "  `nft`      — NFT giveaways & contests 🖼\n"
+            "  `memecoin` — meme coin competitions 🐸\n"
+            "  `project`  — new project & airdrop contests 🚀\n"
+            "  `exchange` — trading competitions 📈",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -525,17 +517,15 @@ async def cmd_setfilter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribers[chat_id]["filter"] = chosen
     save_subscribers(subscribers)
 
-    emoji_map = {"all": "🏆", "meme": "🐸", "art": "🎨", "video": "🎬"}
+    emoji_map = {"all": "🏆", "nft": "🖼", "memecoin": "🐸", "project": "🚀", "exchange": "📈"}
     await update.message.reply_text(
-        f"{emoji_map[chosen]} Filter set to *{chosen.upper()}*\\. "
-        f"You'll only receive {chosen} contest alerts from now on\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        f"{emoji_map[chosen]} Filter set to *{chosen.upper()}*.",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def cmd_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     if chat_id not in subscribers:
         await update.message.reply_text("Send /start first to activate alerts.")
         return
@@ -543,16 +533,13 @@ async def cmd_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) != 2 or not all(a.isdigit() for a in args):
         await update.message.reply_text(
-            "Usage: `/threshold <max_likes> <max_retweets>`\n\n"
-            "Example: `/threshold 30 10`\n"
-            "Only contests with ≤30 likes AND ≤10 retweets will alert you.",
+            "Usage: `/threshold <max_likes> <max_retweets>`\n\nExample: `/threshold 30 10`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
     max_likes    = int(args[0])
     max_retweets = int(args[1])
-
     if max_likes < 1 or max_retweets < 1:
         await update.message.reply_text("Values must be at least 1.")
         return
@@ -562,67 +549,51 @@ async def cmd_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_subscribers(subscribers)
 
     await update.message.reply_text(
-        f"⚙️ *Threshold updated\\!*\n\n"
-        f"  ❤️ Max likes: {max_likes}\n"
-        f"  🔁 Max retweets: {max_retweets}\n\n"
-        f"Contests above these numbers will be ignored for you\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        f"⚙️ *Threshold updated!*\n\n❤️ Max likes: {max_likes}\n🔁 Max retweets: {max_retweets}",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     if chat_id not in subscribers or not subscribers[chat_id].get("active"):
         await update.message.reply_text("Send /start first to activate alerts.")
         return
 
-    await update.message.reply_text(
-        "🔍 Scanning X now\\.\\.\\. any contests found will arrive immediately\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
-    await do_scan(context.application, progress_chat_id=chat_id)
+    await update.message.reply_text("🔍 Scanning X now... contests found will arrive immediately.")
+    found = await do_scan(context.application, progress_chat_id=chat_id)
+    await update.message.reply_text(f"✅ Scan complete. *{found}* new contest(s) found.", parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_autoscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
-
     if chat_id not in subscribers or not subscribers[chat_id].get("active"):
         await update.message.reply_text("Send /start first to activate alerts.")
         return
 
-    # If already running — stop it
     if chat_id in autoscan_tasks and not autoscan_tasks[chat_id].done():
         autoscan_tasks[chat_id].cancel()
         del autoscan_tasks[chat_id]
-        await update.message.reply_text(
-            "⏹ *Autoscan stopped.*\n\nSend /autoscan again to restart\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
+        await update.message.reply_text("⏹ Autoscan stopped. Send /autoscan again to restart.")
         return
 
-    # Start perpetual scan loop
     await update.message.reply_text(
-        "♾ *Autoscan started\\!*\n\n"
-        "I'll scan X continuously and alert you the moment a new contest appears\\.\n"
-        "Send /autoscan again to stop\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        "♾ *Autoscan started!*\n\nI'll scan X continuously and alert you the moment a new contest appears.\nSend /autoscan again to stop.",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
     async def perpetual_loop():
         app = context.application
-        COOLDOWN_ACTIVE = 120   # 2 min when contests found — keep scanning fast
-        COOLDOWN_IDLE   = 300   # 5 min when idle — saves credits
         while True:
             try:
                 found = await do_scan(app)
-                cooldown = COOLDOWN_ACTIVE if found else COOLDOWN_IDLE
-                log.info(f"\u267e Autoscan sleeping {cooldown}s (found={found})")
+                cooldown = 120 if found else 300
+                log.info(f"♾ Autoscan sleeping {cooldown}s")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.warning(f"Autoscan loop error: {e}")
-                cooldown = COOLDOWN_IDLE
+                cooldown = 300
             await asyncio.sleep(cooldown)
 
     task = asyncio.create_task(perpetual_loop())
@@ -638,31 +609,22 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/stop* — Pause your alerts\n"
         "*/status* — Your settings + last scan time\n\n"
         "*/setfilter all* — All contest types\n"
-        "*/setfilter meme* — Meme contests only 🐸\n"
-        "*/setfilter art* — Art contests only 🎨\n"
-        "*/setfilter video* — Video contests only 🎬\n\n"
+        "*/setfilter nft* — NFT contests only 🖼\n"
+        "*/setfilter memecoin* — Meme coin contests only 🐸\n"
+        "*/setfilter project* — New project/airdrop alerts 🚀\n"
+        "*/setfilter exchange* — Trading competitions only 📈\n\n"
         "*/threshold 30 10* — Set max likes / retweets\n"
-        "*/scan* — Run an instant one-time scan now\n"
+        "*/scan* — Run an instant one-time scan\n"
         "*/autoscan* — Toggle perpetual scan loop on/off ♾\n"
-        "*/debug* — Test one query and dump raw results\n"
-        "*/help* — Show this message\n\n"
-        "💡 _Tip: Use /autoscan to never miss a contest — it scans X non-stop._",
+        "*/debug [query]* — Test a query and dump raw results\n"
+        "*/help* — Show this message",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Runs a single test query and dumps everything twitterapi.io returns — raw
-    tweet text, stats, link, and score — so you can see exactly why tweets are
-    passing or failing.
-
-    Usage:
-        /debug               → uses default query "meme contest prize"
-        /debug art contest   → uses custom query
-    """
-    query = " ".join(context.args) if context.args else "meme contest prize"
-    contest_type = "meme"
+    query        = " ".join(context.args) if context.args else "NFT giveaway contest win"
+    contest_type = "nft"
 
     await update.message.reply_text(
         f"🧪 *Debug scrape:* `{query}`\nFetching up to 5 tweets from twitterapi.io...",
@@ -675,17 +637,14 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *No tweets returned.*\n\n"
             "Possible causes:\n"
-            "• TWITTER_USERNAME / PASSWORD / EMAIL not set or invalid\n"
+            "• TWITTERAPI_KEY not set or invalid in Railway Variables\n"
             "• Query returned zero results on X\n"
-            "• Network error (check contest_bot.log for details)",
+            "• Network error — check Railway logs for details",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    await update.message.reply_text(
-        f"✅ Got *{len(tweets)}* tweet(s). Showing details below:",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    await update.message.reply_text(f"✅ Got *{len(tweets)}* tweet(s):", parse_mode=ParseMode.MARKDOWN)
 
     for i, tweet in enumerate(tweets, start=1):
         raw_text = tweet.get("text", "(no text)") or "(no text)"
@@ -694,10 +653,9 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         retweets = tweet.get("stats", {}).get("retweets", "?")
         username = tweet.get("user", {}).get("username", "?")
         score, reasons = score_tweet(raw_text, contest_type)
-        score += 1  # query-match bonus
+        score += 1
         reasons_str = ", ".join(reasons[:4]) or "none"
-
-        preview = raw_text[:200].replace("*", "").replace("_", "").replace("`", "")
+        preview = raw_text[:200].replace("*", "").replace("_", "").replace("`", "").replace("[", "").replace("]", "")
 
         msg = (
             f"*[{i}/{len(tweets)}]* @{username}\n"
@@ -707,15 +665,12 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"_{preview}_"
         )
         try:
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN,
-                                            disable_web_page_preview=True)
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
         except Exception as e:
-            await update.message.reply_text(
-                f"[{i}] @{username} — could not render (parse error: {e})\nLink: {link}"
-            )
+            await update.message.reply_text(f"[{i}] @{username} — render error: {e}\nLink: {link}")
         await asyncio.sleep(0.3)
 
-# ── Scheduled Scan Loop ───────────────────────────────────────────────────────
+# ── Scheduler ─────────────────────────────────────────────────────────────────
 def start_scheduler(app):
     app.job_queue.run_once(lambda ctx: asyncio.ensure_future(do_scan(app)), when=30)
     app.job_queue.run_repeating(
@@ -723,21 +678,20 @@ def start_scheduler(app):
         interval=CHECK_INTERVAL * 60,
         first=CHECK_INTERVAL * 60,
     )
-    log.info(f"⏰ Scheduler started — first scan in 30s, then every {CHECK_INTERVAL} minutes.")
+    log.info(f"⏰ Scheduler started — first scan in 30s, then every {CHECK_INTERVAL} min.")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     if not TELEGRAM_TOKEN:
-        log.error("TELEGRAM_BOT_TOKEN not set in .env — exiting.")
+        log.error("TELEGRAM_BOT_TOKEN not set — exiting.")
         return
-
-    if not TWITTER_USERNAME or not TWITTER_PASSWORD or not TWITTER_EMAIL:
-        log.error("TWITTER_USERNAME / TWITTER_PASSWORD / TWITTER_EMAIL not set — exiting.")
+    if not TWITTERAPI_KEY:
+        log.error("TWITTERAPI_KEY not set — exiting.")
         return
 
     log.info("╔══════════════════════════════════════╗")
-    log.info("║   CONTEST HUNTER BOT (INTERACTIVE)   ║")
-    log.info("║   Backend: twscrape (free)            ║")
+    log.info("║   CONTEST HUNTER BOT — CRYPTO MODE   ║")
+    log.info("║   Backend: twitterapi.io              ║")
     log.info("╚══════════════════════════════════════╝")
     log.info(f"  Scan interval : every {CHECK_INTERVAL} min")
     log.info(f"  Subscribers   : {len(subscribers)} loaded\n")
@@ -759,7 +713,7 @@ def main():
             BotCommand("start",      "Subscribe to contest alerts"),
             BotCommand("stop",       "Pause your alerts"),
             BotCommand("status",     "Your settings and last scan time"),
-            BotCommand("setfilter",  "Filter by type: all | meme | art | video"),
+            BotCommand("setfilter",  "Filter: all | nft | memecoin | project | exchange"),
             BotCommand("threshold",  "Set max likes/retweets e.g. /threshold 30 10"),
             BotCommand("scan",       "Run an instant one-time scan"),
             BotCommand("autoscan",   "Toggle perpetual scan loop on/off"),
