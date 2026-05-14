@@ -96,8 +96,14 @@ def load_seen() -> set:
     return set()
 
 def save_seen(seen: set):
+    # Keep only the newest 5000 entries both in memory and on disk
+    global seen_tweets
+    if len(seen) > 5000:
+        trimmed = set(list(seen)[-5000:])
+        seen_tweets = trimmed
+        seen = trimmed
     with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen)[-5000:], f)
+        json.dump(list(seen), f)
 
 seen_tweets: set = load_seen()
 last_scan_time: str = "Never"
@@ -290,18 +296,20 @@ SCRAPE_TIMEOUT  = 15
 TWITTERAPI_BASE = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 
 def _normalize(raw: dict) -> dict:
-    author   = raw.get("author", {})
-    metrics  = raw.get("publicMetrics", {})
-    tweet_id = raw.get("id", "")
-    username = author.get("userName", "unknown")
-    url      = raw.get("url", "") or f"https://x.com/{username}/status/{tweet_id}"
+    author   = raw.get("author") or {}
+    metrics  = raw.get("publicMetrics") or {}
+    tweet_id = raw.get("id") or ""
+    username = author.get("userName") or "unknown"
+    url      = raw.get("url") or (
+        f"https://x.com/{username}/status/{tweet_id}" if tweet_id else ""
+    )
     return {
         "link":  url,
-        "text":  raw.get("text", ""),
+        "text":  raw.get("text") or "",
         "user":  {"username": username},
         "stats": {
-            "likes":    metrics.get("likeCount", 0),
-            "retweets": metrics.get("retweetCount", 0),
+            "likes":    metrics.get("likeCount") or 0,
+            "retweets": metrics.get("retweetCount") or 0,
         },
     }
 
@@ -329,7 +337,7 @@ def _scrape_blocking(query: str, count: int) -> list:
         return []
 
 async def scrape_tweets(query: str, count: int = 30) -> list:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
             loop.run_in_executor(None, _scrape_blocking, query, count),
@@ -454,28 +462,34 @@ def _deadline_summary(text: str) -> str:
     return ""
 
 
+def _escape_md(text: str) -> str:
+    """Escape characters that break Telegram MarkdownV1 in plain text fields."""
+    return re.sub(r"([*_`\[\]])", r"\\\1", text)
+
+
 def format_alert(tweet: dict, reasons: list, category: str) -> str:
-    likes     = tweet["stats"]["likes"]
-    retweets  = tweet["stats"]["retweets"]
-    username  = tweet["user"]["username"]
-    link      = tweet["link"]
-    safe_text = re.sub(r"[*_`\[\]]", "", tweet["text"][:280])
-    timestamp = datetime.now().strftime("%d %b %Y · %H:%M")
-    emoji     = CATEGORY_EMOJI.get(category, "🏆")
-    reasons_str = "\n".join(f"  • {r}" for r in reasons[:4])
+    likes        = tweet["stats"]["likes"]
+    retweets     = tweet["stats"]["retweets"]
+    username     = _escape_md(tweet["user"]["username"])
+    link         = tweet["link"]
+    safe_text    = re.sub(r"[*_`\[\]]", "", tweet["text"][:280])
+    timestamp    = datetime.now().strftime("%d %b %Y · %H:%M")
+    emoji        = CATEGORY_EMOJI.get(category, "🏆")
+    reasons_str  = "\n".join(f"  • {r}" for r in reasons[:4])
     deadline_line = _deadline_summary(tweet["text"])
 
-    return (
+    base = (
         f"{emoji} *CRYPTO {category.upper()} CONTEST*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 @{username}\n"
         f"❤️ {likes} likes   🔁 {retweets} retweets\n\n"
         f"📝 _{safe_text}_\n\n"
         f"🔍 *Why detected:*\n{reasons_str}\n\n"
-        + (f"{deadline_line}\n\n" if deadline_line else "")
-        + f"🔗 [Open on X]({link})\n"
-        f"⏰ Found: {timestamp}"
     )
+    if deadline_line:
+        base += f"{deadline_line}\n\n"
+    base += f"🔗 [Open on X]({link})\n⏰ Found: {timestamp}"
+    return base
 
 # ── Broadcast ─────────────────────────────────────────────────────────────────
 async def broadcast_alert(app, tweet: dict, reasons: list, category: str):
@@ -487,8 +501,8 @@ async def broadcast_alert(app, tweet: dict, reasons: list, category: str):
     for chat_id, prefs in list(subscribers.items()):
         if not prefs.get("active"):
             continue
-        f = prefs.get("filter", "all")
-        if f != "all" and f != category:
+        user_filter = prefs.get("filter", "all")
+        if user_filter != "all" and user_filter != category:
             continue
         if likes > prefs.get("max_likes", 50) or retweets > prefs.get("max_retweets", 20):
             continue
@@ -510,7 +524,8 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
     log.info(f"\n{'─'*50}\n⏰ Scan at {datetime.now().strftime('%H:%M:%S')}\n{'─'*50}")
     found = 0
 
-    async def ping(text: str):
+    async def notify(text: str):
+        """Single Telegram message to the requesting user only — no per-query spam."""
         if not progress_chat_id:
             return
         try:
@@ -521,10 +536,15 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
         except Exception:
             pass
 
+    # One clean status line at scan start (only fires when user runs /scan)
+    await notify(
+        f"🔍 *Scan started* — checking {len(SEARCH_TARGETS)} queries across "
+        f"{len(CATEGORIES)} categories...\n_Results will appear below as found._"
+    )
+
     for idx, (query, category) in enumerate(SEARCH_TARGETS, 1):
         recent_query = build_recent_query(query)   # last 7 days only
-        log.info(f"🔍 [{category.upper()}] {recent_query}")
-        await ping(f"🔍 `[{idx}/{len(SEARCH_TARGETS)}]` *{category}* — _{query}_")
+        log.info(f"🔍 [{idx}/{len(SEARCH_TARGETS)}] [{category.upper()}] {recent_query}")
 
         tweets = await scrape_tweets(recent_query, count=30)
         if not tweets:
@@ -554,10 +574,7 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
             log.info(f"  🎯 @{u} | score={score} | ❤️{l} 🔁{r}")
             found += 1
 
-            await ping(
-                f"{CATEGORY_EMOJI[category]} *Crypto {category} contest found!*\n"
-                f"👤 @{u} · ❤️ {l} · 🔁 {r}\n🔗 {link}"
-            )
+            # broadcast_alert already sends the full formatted alert to all subscribers
             await broadcast_alert(app, tweet, reasons, category)
             await asyncio.sleep(0.5)
 
@@ -682,10 +699,10 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in subscribers or not subscribers[chat_id].get("active"):
         await update.message.reply_text("Send /start first.")
         return
-    await update.message.reply_text("🔍 Scanning X for crypto contests now...")
     found = await do_scan(context.application, progress_chat_id=chat_id)
     await update.message.reply_text(
-        f"✅ Scan complete — *{found}* new crypto contest(s) found.",
+        f"✅ *Scan complete* — *{found}* new contest(s) found.\n"
+        f"_Only contests with 2+ days remaining are shown._",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -750,11 +767,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query    = " ".join(context.args) if context.args else "NFT giveaway contest win"
     category = "nft"
+    recent_query = build_recent_query(query)
     await update.message.reply_text(
-        f"🧪 *Debug:* `{query}`\nFetching 5 tweets...",
+        f"🧪 *Debug:* `{query}`\nFetching 5 recent tweets (last 7 days)...",
         parse_mode=ParseMode.MARKDOWN,
     )
-    tweets = await scrape_tweets(query, count=5)
+    tweets = await scrape_tweets(recent_query, count=5)
     if not tweets:
         await update.message.reply_text(
             "❌ *No results.*\n\n"
@@ -776,7 +794,7 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         score += 1
         preview = re.sub(r"[*_`\[\]]", "", text)[:200]
         msg = (
-            f"*[{i}/{len(tweets)}]* @{username}\n"
+            f"*[{i}/{len(tweets)}]* @{_escape_md(username)}\n"
             f"❤️ {likes}  🔁 {retweets}  Score: {score}\n"
             f"Signals: {', '.join(reasons[:3]) or 'none'}\n"
             f"Link: {link}\n\n_{preview}_"
@@ -789,9 +807,12 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 def start_scheduler(app):
-    app.job_queue.run_once(lambda ctx: asyncio.ensure_future(do_scan(app)), when=30)
+    async def _run_scan(ctx):
+        asyncio.create_task(do_scan(app))
+
+    app.job_queue.run_once(_run_scan, when=30)
     app.job_queue.run_repeating(
-        lambda ctx: asyncio.ensure_future(do_scan(app)),
+        _run_scan,
         interval=CHECK_INTERVAL * 60,
         first=CHECK_INTERVAL * 60,
     )
@@ -839,7 +860,14 @@ def main():
         ])
         start_scheduler(application)
 
-    app.post_init = post_init
+    async def post_shutdown(application):
+        for task in list(autoscan_tasks.values()):
+            if not task.done():
+                task.cancel()
+        log.info("🛑 All autoscan tasks cancelled on shutdown.")
+
+    app.post_init     = post_init
+    app.post_shutdown = post_shutdown
     log.info("🤖 Bot running.\n")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
