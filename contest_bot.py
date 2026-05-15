@@ -793,7 +793,7 @@ async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info(f"Cache cleared by {update.effective_chat.id} — {count} entries removed.")
 
 
-
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query    = " ".join(context.args) if context.args else "NFT giveaway contest win"
     category = "nft"
     recent_query = build_recent_query(query)
