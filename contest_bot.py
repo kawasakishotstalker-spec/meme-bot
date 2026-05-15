@@ -96,16 +96,20 @@ def load_seen() -> set:
     return set()
 
 def save_seen(seen: set):
-    # Keep only the newest 5000 entries both in memory and on disk
+    # Keep only the newest 2000 entries to prevent the cache from blocking all future results
     global seen_tweets
-    if len(seen) > 5000:
-        trimmed = set(list(seen)[-5000:])
+    if len(seen) > 2000:
+        trimmed = set(list(seen)[-2000:])
         seen_tweets = trimmed
         seen = trimmed
     with open(SEEN_FILE, "w") as f:
         json.dump(list(seen), f)
 
 seen_tweets: set = load_seen()
+if len(seen_tweets) > 500:
+    logging.getLogger(__name__).warning(
+        f"⚠️  seen_tweets cache has {len(seen_tweets)} entries — run /clearcache if scans keep returning 0."
+    )
 last_scan_time: str = "Never"
 autoscan_tasks: dict = {}
 
@@ -351,13 +355,19 @@ async def scrape_tweets(query: str, count: int = 30) -> list:
         return []
 
 
-# ── Recency: build a date-bounded query (last 7 days) ────────────────────────
+# ── Recency: build a query (optionally date-bounded) ─────────────────────────
 def build_recent_query(base_query: str, days_back: int = 7) -> str:
-    """Append since: / until: operators so the API returns only recent tweets."""
-    now   = datetime.now(timezone.utc)
-    since = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
-    until = (now + timedelta(days=1)).strftime("%Y-%m-%d")   # inclusive today
-    return f"{base_query} since:{since} until:{until}"
+    """
+    Return the query string.  Date operators (since:/until:) are only appended
+    when TWITTERAPI_DATE_FILTER=1 is set, because the free/basic twitterapi.io
+    tier silently returns 0 results when those operators are present.
+    """
+    if os.getenv("TWITTERAPI_DATE_FILTER", "0") == "1":
+        now   = datetime.now(timezone.utc)
+        since = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        until = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        return f"{base_query} since:{since} until:{until}"
+    return base_query
 
 
 # ── Deadline filter: skip contests ending in < MIN_DAYS_REMAINING ─────────────
@@ -504,7 +514,7 @@ async def broadcast_alert(app, tweet: dict, reasons: list, category: str):
         user_filter = prefs.get("filter", "all")
         if user_filter != "all" and user_filter != category:
             continue
-        if likes > prefs.get("max_likes", 50) or retweets > prefs.get("max_retweets", 20):
+        if likes > prefs.get("max_likes", 5000) or retweets > prefs.get("max_retweets", 2000):
             continue
         try:
             await app.bot.send_message(
@@ -572,7 +582,7 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
             score += 1
             reasons.insert(0, f"crypto search: {category}")
 
-            if score < 1:
+            if score < 2:
                 continue
 
             u = tweet["user"]["username"]
@@ -609,7 +619,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     subscribers[chat_id] = {
         "active": True, "filter": "all",
-        "max_likes": 50, "max_retweets": 20,
+        "max_likes": 5000, "max_retweets": 2000,
         "joined": datetime.now().isoformat(),
     }
     save_subscribers(subscribers)
@@ -618,7 +628,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You'll receive alerts when low-engagement crypto contests are spotted on X.\n\n"
         "📌 *Defaults:*\n"
         "  • Filter: All crypto categories\n"
-        "  • Max likes: 50  |  Max retweets: 20\n\n"
+        "  • Max likes: 5000  |  Max retweets: 2000\n\n"
         "Send /help to see all commands.",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -647,8 +657,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━\n"
         f"Alerts: {'✅ Active' if prefs.get('active') else '⏸ Paused'}\n"
         f"Filter: {prefs.get('filter', 'all').upper()}\n"
-        f"Max likes: {prefs.get('max_likes', 50)}\n"
-        f"Max retweets: {prefs.get('max_retweets', 20)}\n"
+        f"Max likes: {prefs.get('max_likes', 5000)}\n"
+        f"Max retweets: {prefs.get('max_retweets', 2000)}\n"
         f"Since: {prefs.get('joined', '')[:10]}\n\n"
         f"🕐 Last scan: {last_scan_time}\n"
         f"👥 Active subscribers: {active_count}",
@@ -872,6 +882,7 @@ def main():
             BotCommand("scan",       "Run an instant scan now"),
             BotCommand("autoscan",   "Toggle continuous scanning on/off"),
             BotCommand("clearcache", "Clear seen-tweets cache to re-fetch all results"),
+            BotCommand("debug",      "Test a query — e.g. /debug NFT giveaway"),
             BotCommand("help",       "Show all commands"),
         ])
         start_scheduler(application)
