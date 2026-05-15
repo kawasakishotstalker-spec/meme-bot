@@ -83,6 +83,19 @@ def save_subscribers(subs: dict):
 
 subscribers: dict = load_subscribers()
 
+# ── Migrate old subscribers with the old tight thresholds (50/20) ─────────────
+_migrated = 0
+for _cid, _prefs in subscribers.items():
+    if _prefs.get("max_likes", 5000) <= 50:
+        _prefs["max_likes"]    = 5000
+        _migrated += 1
+    if _prefs.get("max_retweets", 2000) <= 20:
+        _prefs["max_retweets"] = 2000
+if _migrated:
+    save_subscribers(subscribers)
+    # log not available yet, use print
+    print(f"[MIGRATION] Upgraded {_migrated} subscriber(s) to new thresholds (5000/2000)")
+
 # ── Seen Tweets Cache ─────────────────────────────────────────────────────────
 SEEN_FILE = "seen_tweets.json"
 
@@ -300,20 +313,28 @@ SCRAPE_TIMEOUT  = 15
 TWITTERAPI_BASE = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 
 def _normalize(raw: dict) -> dict:
+    """
+    twitterapi.io returns likeCount / retweetCount as TOP-LEVEL fields on each
+    tweet — NOT nested inside 'publicMetrics'. The old code always read {} and
+    got 0 for every engagement field, breaking filtering and scoring.
+    """
     author   = raw.get("author") or {}
-    metrics  = raw.get("publicMetrics") or {}
     tweet_id = raw.get("id") or ""
     username = author.get("userName") or "unknown"
     url      = raw.get("url") or (
         f"https://x.com/{username}/status/{tweet_id}" if tweet_id else ""
     )
+    # Read top-level engagement fields (fallback covers snake_case variants)
+    likes    = int(raw.get("likeCount")    or raw.get("like_count")    or 0)
+    retweets = int(raw.get("retweetCount") or raw.get("retweet_count") or 0)
+    log.debug(f"  _normalize @{username}: likes={likes} rts={retweets}")
     return {
         "link":  url,
         "text":  raw.get("text") or "",
         "user":  {"username": username},
         "stats": {
-            "likes":    metrics.get("likeCount") or 0,
-            "retweets": metrics.get("retweetCount") or 0,
+            "likes":    likes,
+            "retweets": retweets,
         },
     }
 
@@ -329,7 +350,14 @@ def _scrape_blocking(query: str, count: int) -> list:
             timeout=SCRAPE_TIMEOUT,
         )
         resp.raise_for_status()
-        return [_normalize(t) for t in resp.json().get("tweets", []) or []]
+        data = resp.json()
+        raw_tweets = data.get("tweets", []) or []
+        if raw_tweets:
+            # Log first tweet's top-level keys once per startup to verify schema
+            sample_keys = list(raw_tweets[0].keys())
+            log.debug(f"  API tweet keys: {sample_keys}")
+            log.debug(f"  likeCount={raw_tweets[0].get('likeCount')} retweetCount={raw_tweets[0].get('retweetCount')}")
+        return [_normalize(t) for t in raw_tweets]
     except requests.exceptions.Timeout:
         log.warning(f"Timeout: '{query}'")
         return []
@@ -832,9 +860,10 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         score, reasons = score_tweet(text, category)
         score += 1
         preview = re.sub(r"[*_`\[\]]", "", text)[:200]
+        would_pass = "✅ WOULD ALERT" if score >= 2 else "❌ score too low"
         msg = (
             f"*[{i}/{len(tweets)}]* @{_escape_md(username)}\n"
-            f"❤️ {likes}  🔁 {retweets}  Score: {score}\n"
+            f"❤️ {likes}  🔁 {retweets}  Score: {score} — {would_pass}\n"
             f"Signals: {', '.join(reasons[:3]) or 'none'}\n"
             f"Link: {link}\n\n_{preview}_"
         )
