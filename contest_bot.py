@@ -542,9 +542,14 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
         f"{len(CATEGORIES)} categories...\n_Results will appear below as found._"
     )
 
+    batch_size = 10  # send a progress ping every N queries
     for idx, (query, category) in enumerate(SEARCH_TARGETS, 1):
         recent_query = build_recent_query(query)   # last 7 days only
         log.info(f"🔍 [{idx}/{len(SEARCH_TARGETS)}] [{category.upper()}] {recent_query}")
+
+        # Periodic progress update so user knows it's still running
+        if progress_chat_id and idx % batch_size == 0:
+            await notify(f"⏳ Still scanning... ({idx}/{len(SEARCH_TARGETS)} queries done, {found} found so far)")
 
         tweets = await scrape_tweets(recent_query, count=30)
         if not tweets:
@@ -553,9 +558,11 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
 
         for tweet in tweets:
             link = tweet.get("link", "")
-            if not link or link in seen_tweets:
+            # Use tweet ID extracted from link as dedup key; skip if no link at all
+            tweet_id = link.split("/status/")[-1].split("?")[0] if "/status/" in link else ""
+            if not tweet_id or tweet_id in seen_tweets:
                 continue
-            seen_tweets.add(link)
+            seen_tweets.add(tweet_id)
 
             # ── Skip contests ending in < 2 days ─────────────────────────
             if not has_enough_time_remaining(tweet["text"]):
@@ -565,7 +572,7 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
             score += 1
             reasons.insert(0, f"crypto search: {category}")
 
-            if score < 2:
+            if score < 1:
                 continue
 
             u = tweet["user"]["username"]
@@ -583,6 +590,15 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
     last_scan_time = datetime.now().strftime("%d %b %Y · %H:%M")
     save_seen(seen_tweets)
     log.info(f"✅ Done — {found} contest(s) found.\n")
+    if found == 0:
+        await notify(
+            "😶 *Scan complete — 0 contests found.*\n\n"
+            "Possible reasons:\n"
+            "• All results were already seen (cached)\n"
+            "• Tweets didn't score high enough\n"
+            "• API returned no results for these queries\n\n"
+            "Try `/debug NFT giveaway contest win` to test the API directly."
+        )
     return found
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
@@ -758,13 +774,26 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*/threshold 30 10* — Max likes / max retweets\n"
         "*/scan* — Instant one-time scan\n"
         "*/autoscan* — Toggle continuous scanning ♾\n"
+        "*/clearcache* — Reset seen-tweets cache 🗑\n"
         "*/debug [query]* — Test a query, see raw results\n"
         "*/help* — This message",
         parse_mode=ParseMode.MARKDOWN,
     )
 
 
-async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global seen_tweets
+    count = len(seen_tweets)
+    seen_tweets = set()
+    save_seen(seen_tweets)
+    await update.message.reply_text(
+        f"🗑 *Cache cleared!*\n{count} seen tweet(s) removed.\n\nRun /scan to get fresh results.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    log.info(f"Cache cleared by {update.effective_chat.id} — {count} entries removed.")
+
+
+
     query    = " ".join(context.args) if context.args else "NFT giveaway contest win"
     category = "nft"
     recent_query = build_recent_query(query)
@@ -840,9 +869,10 @@ def main():
             BotCommand("status",    "Your settings and last scan time"),
             BotCommand("setfilter", "all | nft | memecoin | project | exchange | creative"),
             BotCommand("threshold", "Max likes/retweets — e.g. /threshold 30 10"),
-            BotCommand("scan",      "Run an instant scan now"),
-            BotCommand("autoscan",  "Toggle continuous scanning on/off"),
-            BotCommand("help",      "Show all commands"),
+            BotCommand("scan",       "Run an instant scan now"),
+            BotCommand("autoscan",   "Toggle continuous scanning on/off"),
+            BotCommand("clearcache", "Clear seen-tweets cache to re-fetch all results"),
+            BotCommand("help",       "Show all commands"),
         ])
         start_scheduler(application)
 
@@ -860,15 +890,16 @@ def main():
         .build()
     )
     for cmd, fn in [
-        ("start",     cmd_start),
-        ("stop",      cmd_stop),
-        ("status",    cmd_status),
-        ("setfilter", cmd_setfilter),
-        ("threshold", cmd_threshold),
-        ("scan",      cmd_scan),
-        ("autoscan",  cmd_autoscan),
-        ("help",      cmd_help),
-        ("debug",     cmd_debug),
+        ("start",      cmd_start),
+        ("stop",       cmd_stop),
+        ("status",     cmd_status),
+        ("setfilter",  cmd_setfilter),
+        ("threshold",  cmd_threshold),
+        ("scan",       cmd_scan),
+        ("autoscan",   cmd_autoscan),
+        ("clearcache", cmd_clearcache),
+        ("help",       cmd_help),
+        ("debug",      cmd_debug),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
     log.info("🤖 Bot running.\n")
