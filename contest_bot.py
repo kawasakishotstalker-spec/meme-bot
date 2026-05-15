@@ -340,7 +340,7 @@ async def scrape_tweets(query: str, count: int = 30) -> list:
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(None, _scrape_blocking, query, count),
+            loop.run_in_executor(None, lambda: _scrape_blocking(query, count)),
             timeout=SCRAPE_TIMEOUT + 5,
         )
     except asyncio.TimeoutError:
@@ -383,7 +383,7 @@ _ENDS_ON_DATE    = re.compile(
 _MONTH_MAP = {
     "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
     "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
-    "january":1,"february":2,"march":3,"april":4,"june":6,
+    "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
     "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
 }
 
@@ -787,9 +787,9 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, tweet in enumerate(tweets, 1):
         text     = tweet.get("text", "") or ""
         link     = tweet.get("link", "") or ""
-        likes    = tweet["stats"]["likes"]
-        retweets = tweet["stats"]["retweets"]
-        username = tweet["user"]["username"]
+        likes    = tweet.get("stats", {}).get("likes", 0)
+        retweets = tweet.get("stats", {}).get("retweets", 0)
+        username = tweet.get("user", {}).get("username", "unknown")
         score, reasons = score_tweet(text, category)
         score += 1
         preview = re.sub(r"[*_`\[\]]", "", text)[:200]
@@ -800,7 +800,7 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Link: {link}\n\n_{preview}_"
         )
         try:
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)  # noqa: E501
         except Exception as e:
             await update.message.reply_text(f"[{i}] @{username} — render error: {e}\n{link}")
         await asyncio.sleep(0.3)
@@ -808,7 +808,7 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 def start_scheduler(app):
     async def _run_scan(ctx):
-        asyncio.create_task(do_scan(app))
+        await do_scan(app)
 
     app.job_queue.run_once(_run_scan, when=30)
     app.job_queue.run_repeating(
@@ -833,20 +833,6 @@ def main():
     log.info(f"║   Interval: every {CHECK_INTERVAL} min              ║")
     log.info("╚══════════════════════════════════════╝")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    for cmd, fn in [
-        ("start",     cmd_start),
-        ("stop",      cmd_stop),
-        ("status",    cmd_status),
-        ("setfilter", cmd_setfilter),
-        ("threshold", cmd_threshold),
-        ("scan",      cmd_scan),
-        ("autoscan",  cmd_autoscan),
-        ("help",      cmd_help),
-        ("debug",     cmd_debug),
-    ]:
-        app.add_handler(CommandHandler(cmd, fn))
-
     async def post_init(application):
         await application.bot.set_my_commands([
             BotCommand("start",     "Subscribe to crypto contest alerts"),
@@ -866,8 +852,25 @@ def main():
                 task.cancel()
         log.info("🛑 All autoscan tasks cancelled on shutdown.")
 
-    app.post_init     = post_init
-    app.post_shutdown = post_shutdown
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+    for cmd, fn in [
+        ("start",     cmd_start),
+        ("stop",      cmd_stop),
+        ("status",    cmd_status),
+        ("setfilter", cmd_setfilter),
+        ("threshold", cmd_threshold),
+        ("scan",      cmd_scan),
+        ("autoscan",  cmd_autoscan),
+        ("help",      cmd_help),
+        ("debug",     cmd_debug),
+    ]:
+        app.add_handler(CommandHandler(cmd, fn))
     log.info("🤖 Bot running.\n")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
