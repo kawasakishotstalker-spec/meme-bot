@@ -30,8 +30,9 @@ USER COMMANDS:
 
 RAILWAY ENV VARS:
     TELEGRAM_BOT_TOKEN=...
-    TWITTERAPI_KEY=...
-    CHECK_INTERVAL=20
+    TWITTERAPI_KEY=...           ← your GetX API key
+    CHECK_INTERVAL=20            ← scan every N minutes
+    # TWITTERAPI_DATE_FILTER no longer needed — time window enforced via API params
 """
 
 import os
@@ -331,6 +332,10 @@ def score_tweet(text: str, category: str) -> tuple:
 
     return score, reasons
 
+# ── Recency window ────────────────────────────────────────────────────────────
+TWEET_MAX_AGE_DAYS   = 7        # reject tweets older than 7 days
+TWEET_MIN_AGE_SECS   = 60       # reject tweets newer than 1 minute (spam/duplicates)
+
 # ── twitterapi.io Scraper ─────────────────────────────────────────────────────
 SCRAPE_TIMEOUT  = 15
 TWITTERAPI_BASE = "https://api.getxapi.com/twitter/tweet/advanced_search"
@@ -374,12 +379,18 @@ def _normalize(raw: dict) -> dict:
         "retweetCount", "retweet_count",
     ) or _extract_int(pm, "retweet_count", "retweetCount")
 
-    log.info(f"  📊 @{username}: ❤️{likes} 🔁{retweets}")
+    # Extract tweet creation timestamp — try every field name the API may use
+    created_at_raw = (
+        raw.get("createdAt") or raw.get("created_at") or
+        raw.get("timestamp") or raw.get("date") or ""
+    )
+    log.info(f"  📊 @{username}: ❤️{likes} 🔁{retweets} 🕐{created_at_raw[:19] if created_at_raw else 'no-ts'}")
     return {
-        "link":  url,
-        "text":  raw.get("text") or "",
-        "user":  {"username": username},
-        "stats": {"likes": likes, "retweets": retweets},
+        "link":       url,
+        "text":       raw.get("text") or "",
+        "user":       {"username": username},
+        "stats":      {"likes": likes, "retweets": retweets},
+        "created_at": created_at_raw,
     }
 
 def _scrape_blocking(query: str, count: int) -> list:
@@ -387,10 +398,21 @@ def _scrape_blocking(query: str, count: int) -> list:
         log.error("TWITTERAPI_KEY not set.")
         return []
     try:
+        now       = datetime.now(timezone.utc)
+        start_time = (now - timedelta(days=TWEET_MAX_AGE_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_time   = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        params = {
+            "q":          query,
+            "product":    "Latest",
+            "count":      min(count, 100),
+            "start_time": start_time,
+            "end_time":   end_time,
+        }
         resp = requests.get(
             TWITTERAPI_BASE,
             headers={"Authorization": f"Bearer {TWITTERAPI_KEY}"},
-            params={"q": query, "product": "Latest", "count": min(count, 100)},
+            params=params,
             timeout=SCRAPE_TIMEOUT,
         )
         resp.raise_for_status()
@@ -404,6 +426,7 @@ def _scrape_blocking(query: str, count: int) -> list:
             t0 = raw_tweets[0]
             log.info(f"  🔑 Tweet keys: {list(t0.keys())}")
             log.info(f"  📈 Raw counts: likeCount={t0.get('likeCount')} retweetCount={t0.get('retweetCount')} publicMetrics={t0.get('publicMetrics')}")
+            log.info(f"  📅 Time window: {start_time} → {end_time}")
         else:
             log.warning(f"  ⚠️  API returned 0 tweets. Top-level keys: {list(data.keys())}  Full: {str(data)[:300]}")
         return [_normalize(t) for t in raw_tweets]
@@ -435,22 +458,70 @@ async def scrape_tweets(query: str, count: int = 30) -> list:
 # ── Recency: build a query (optionally date-bounded) ─────────────────────────
 def build_recent_query(base_query: str, days_back: int = 7) -> str:
     """
-    Appends quality filters to every query:
-    - min_faves:1  → drops zero-engagement/spam tweets at API level
-    - lang:en      → English only, avoids duplicate foreign-language reposts
+    Appends quality filters to every query.
+    Time-window enforcement is done via start_time/end_time API params in
+    _scrape_blocking — NOT via query string operators (GetX ignores those).
+    - min_faves:1  → drops zero-engagement spam at API level
+    - lang:en      → English only
     - -is:retweet  → original tweets only, no RT noise
-    Date operators only if TWITTERAPI_DATE_FILTER=1 (paid tier feature).
     """
-    query = f"{base_query} min_faves:1 lang:en -is:retweet"
-    if os.getenv("TWITTERAPI_DATE_FILTER", "0") == "1":
-        now   = datetime.now(timezone.utc)
-        since = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        until = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-        return f"{query} since:{since} until:{until}"
-    return query
+    return f"{base_query} min_faves:1 lang:en -is:retweet"
+
+def _parse_tweet_age(created_at_raw: str):
+    """
+    Parse the tweet's created_at string into a UTC datetime.
+    Returns None if unparseable (we let it through rather than silently drop).
+    """
+    if not created_at_raw:
+        return None
+    formats = [
+        "%a %b %d %H:%M:%S %z %Y",   # Twitter classic: "Mon Jan 01 12:00:00 +0000 2024"
+        "%Y-%m-%dT%H:%M:%S.%fZ",      # ISO with microseconds
+        "%Y-%m-%dT%H:%M:%SZ",         # ISO plain
+        "%Y-%m-%d %H:%M:%S",          # bare datetime
+        "%Y-%m-%dT%H:%M:%S%z",        # ISO with tz offset
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(created_at_raw, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    # last attempt: dateutil if installed
+    try:
+        from dateutil import parser as du
+        return du.parse(created_at_raw)
+    except Exception:
+        pass
+    return None
 
 
-# ── Deadline filter: skip contests ending in < MIN_DAYS_REMAINING ─────────────
+def is_tweet_age_valid(tweet: dict) -> bool:
+    """
+    Returns True only if the tweet is between TWEET_MIN_AGE_SECS and
+    TWEET_MAX_AGE_DAYS old.  If we can't parse the timestamp we allow
+    the tweet through (don't silently kill results when API changes fields).
+    """
+    created_at_raw = tweet.get("created_at", "")
+    dt = _parse_tweet_age(created_at_raw)
+    if dt is None:
+        log.debug("  ⚠️  No parseable created_at — allowing tweet through")
+        return True
+
+    now     = datetime.now(timezone.utc)
+    age_sec = (now - dt).total_seconds()
+
+    if age_sec < TWEET_MIN_AGE_SECS:
+        log.debug(f"  ⏩ Too fresh ({int(age_sec)}s old) — skipping")
+        return False
+    if age_sec > TWEET_MAX_AGE_DAYS * 86_400:
+        log.debug(f"  🗓 Too old ({age_sec/86400:.1f}d) — skipping")
+        return False
+    return True
+
+
 MIN_DAYS_REMAINING = 2   # contests must have at least this many days left
 
 # Patterns that signal how many days/hours remain
@@ -510,10 +581,13 @@ def has_enough_time_remaining(text: str) -> bool:
             return False
         return True
 
-    # "ends in X hours" or "X hours left" → always < 1 day → skip
+    # "ends in X hours" or "X hours left"
+    # NOTE: we no longer skip these — a tweet saying "ends in 3 hours" is
+    # still a live contest and was probably posted very recently.
+    # Age filtering via is_tweet_age_valid() handles recency separately.
     if _ENDS_IN_HOURS.search(lower) or _HOURS_LEFT.search(lower):
-        log.debug("  ⏳ Skipped — ends in hours.")
-        return False
+        log.debug("  ⏳ Contest ending in hours — still alerting (recency check handles age).")
+        return True
 
     # "ends on DD MonthName [YYYY]"
     m = _ENDS_ON_DATE.search(text)
@@ -568,6 +642,18 @@ def format_alert(tweet: dict, reasons: list, category: str) -> str:
     reasons_str  = "\n".join(f"  • {r}" for r in reasons[:4])
     deadline_line = _deadline_summary(tweet["text"])
 
+    # Human-readable tweet age
+    age_line = ""
+    dt = _parse_tweet_age(tweet.get("created_at", ""))
+    if dt:
+        age_sec = (datetime.now(timezone.utc) - dt).total_seconds()
+        if age_sec < 3600:
+            age_line = f"🕐 Posted: {int(age_sec/60)}m ago"
+        elif age_sec < 86400:
+            age_line = f"🕐 Posted: {int(age_sec/3600)}h ago"
+        else:
+            age_line = f"🕐 Posted: {int(age_sec/86400)}d ago"
+
     base = (
         f"{emoji} *CRYPTO {category.upper()} CONTEST*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -576,6 +662,8 @@ def format_alert(tweet: dict, reasons: list, category: str) -> str:
         f"📝 _{safe_text}_\n\n"
         f"🔍 *Why detected:*\n{reasons_str}\n\n"
     )
+    if age_line:
+        base += f"{age_line}\n"
     if deadline_line:
         base += f"{deadline_line}\n\n"
     base += f"🔗 [Open on X]({link})\n⏰ Found: {timestamp}"
@@ -664,6 +752,10 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
             if not tweet_id or tweet_id in seen_tweets:
                 continue
             seen_tweets.add(tweet_id)
+
+            # ── Enforce tweet recency (1 min – 7 days) ───────────────────
+            if not is_tweet_age_valid(tweet):
+                continue
 
             # ── Skip contests ending in < 2 days ─────────────────────────
             if not has_enough_time_remaining(tweet["text"]):
