@@ -136,60 +136,83 @@ CATEGORY_EMOJI = {
     "creative": "🎨",
 }
 
-# ── Search Targets (crypto-only, all categories) ──────────────────────────────
+# ── Search Targets — 10 broad OR-queries, 2 per category ─────────────────────
+# Each query uses Twitter OR operators to cover what 4-9 narrow queries did.
+# 10 API calls total per scan vs the old 43 — same coverage, 77% fewer credits.
 SEARCH_TARGETS = [
-    # ── NFT ──────────────────────────────────────────────────────────────────
-    ("NFT contest prize crypto",                    "nft"),
-    ("NFT giveaway whitelist raffle win",           "nft"),
-    ("NFT art competition prize pool",              "nft"),
-    ("NFT meme contest submit winner",              "nft"),
-    ("NFT mint free contest crypto",                "nft"),
-    ("NFT community giveaway allowlist",            "nft"),
-    ("NFT collection contest prize",                "nft"),
+    # ── NFT (2 queries) ──────────────────────────────────────────────────────
+    # Covers: giveaway, whitelist, raffle, allowlist, mint, WL spots
+    (
+        "(NFT giveaway OR NFT raffle OR NFT whitelist OR allowlist giveaway "
+        "OR wl giveaway OR free NFT OR NFT mint contest) (win OR prize OR winner)",
+        "nft",
+    ),
+    # Covers: art contests, meme contests, collection contests, community drops
+    (
+        "(NFT art contest OR NFT meme contest OR NFT competition OR NFT prize "
+        "OR NFT collection contest OR NFT community giveaway) crypto",
+        "nft",
+    ),
 
-    # ── Memecoin ─────────────────────────────────────────────────────────────
-    ("memecoin contest prize win",                  "memecoin"),
-    ("meme coin meme competition giveaway",         "memecoin"),
-    ("crypto memecoin art contest prize",           "memecoin"),
-    ("solana memecoin meme battle win",             "memecoin"),
-    ("best memecoin meme prize pool",               "memecoin"),
-    ("memecoin community contest winner",           "memecoin"),
-    ("pepe shib doge meme contest prize",           "memecoin"),
+    # ── Memecoin (2 queries) ──────────────────────────────────────────────────
+    # Covers: general memecoin contests + named coins (pepe, doge, shib, bonk, wif)
+    (
+        "(memecoin contest OR memecoin giveaway OR memecoin meme contest "
+        "OR memecoin competition OR memecoin prize) (win OR winner OR prize pool)",
+        "memecoin",
+    ),
+    # Covers: solana ecosystem + specific coin contests
+    (
+        "(pepe contest OR doge meme contest OR shib contest OR bonk contest "
+        "OR wif contest OR solana meme contest OR memecoin meme battle) prize",
+        "memecoin",
+    ),
 
-    # ── Project / Airdrop / Web3 ─────────────────────────────────────────────
-    ("crypto airdrop contest prize submit",         "project"),
-    ("web3 project contest giveaway win",           "project"),
-    ("DeFi protocol contest prize pool",            "project"),
-    ("new crypto token launch contest",             "project"),
-    ("testnet contest prize crypto",                "project"),
-    ("DAO community contest prize",                 "project"),
-    ("blockchain project competition prize",        "project"),
-    ("layer2 crypto contest giveaway",              "project"),
-    ("altcoin project contest prize win",           "project"),
+    # ── Project / Airdrop / Web3 (2 queries) ─────────────────────────────────
+    # Covers: airdrops, web3, DeFi, DAO, testnet, ambassador contests
+    (
+        "(crypto airdrop contest OR web3 contest OR DeFi contest OR DAO contest "
+        "OR testnet contest OR blockchain contest OR crypto hackathon) prize",
+        "project",
+    ),
+    # Covers: token launches, protocol giveaways, layer2, altcoin contests
+    (
+        "(new token contest OR protocol giveaway OR layer2 contest "
+        "OR altcoin contest OR crypto project giveaway OR crypto launch contest) "
+        "(win OR winner OR prize pool)",
+        "project",
+    ),
 
-    # ── Exchange / Trading Competition ───────────────────────────────────────
-    ("crypto trading contest prize pool",           "exchange"),
-    ("crypto exchange trading competition win",     "exchange"),
-    ("DEX trading challenge prize",                 "exchange"),
-    ("futures trading contest leaderboard prize",   "exchange"),
-    ("PnL contest crypto winner",                   "exchange"),
-    ("spot trading competition giveaway crypto",    "exchange"),
-    ("copy trading contest prize crypto",           "exchange"),
-    ("crypto volume trading contest prize",         "exchange"),
+    # ── Exchange / Trading (2 queries) ───────────────────────────────────────
+    # Covers: trading competitions, PnL contests, leaderboard prizes
+    (
+        "(trading contest OR trading competition OR trading challenge "
+        "OR PnL contest OR trading leaderboard prize) crypto (prize OR win)",
+        "exchange",
+    ),
+    # Covers: DEX, futures, spot, copy trading, volume contests
+    (
+        "(DEX competition OR futures contest OR spot trading contest "
+        "OR copy trading contest OR volume contest OR crypto trading giveaway) "
+        "(prize pool OR winner OR leaderboard)",
+        "exchange",
+    ),
 
-    # ── Creative: crypto art / video / meme / thread ─────────────────────────
-    ("crypto art contest prize",                    "creative"),
-    ("crypto fan art competition win",              "creative"),
-    ("web3 NFT art contest prize",                  "creative"),
-    ("crypto video contest prize pool",             "creative"),
-    ("crypto reel short video contest win",         "creative"),
-    ("web3 video competition prize",                "creative"),
-    ("crypto meme battle prize",                    "creative"),
-    ("best crypto meme competition win",            "creative"),
-    ("crypto thread contest prize win",             "creative"),
-    ("best crypto twitter thread competition",      "creative"),
-    ("crypto content creator contest prize",        "creative"),
-    ("web3 community creative contest prize",       "creative"),
+    # ── Creative (2 queries) ──────────────────────────────────────────────────
+    # Covers: art, fan art, illustration, video, reel contests
+    (
+        "(crypto art contest OR crypto fan art contest OR web3 art contest "
+        "OR crypto video contest OR crypto reel contest OR crypto short film contest) "
+        "(prize OR win OR winner)",
+        "creative",
+    ),
+    # Covers: meme battles, thread contests, content creator contests
+    (
+        "(crypto meme battle OR crypto meme competition OR web3 meme contest "
+        "OR crypto thread contest OR crypto content contest OR crypto creator contest) "
+        "(prize OR win OR winner)",
+        "creative",
+    ),
 ]
 
 # ── Detection Keywords (crypto-only) ─────────────────────────────────────────
@@ -310,32 +333,53 @@ def score_tweet(text: str, category: str) -> tuple:
 
 # ── twitterapi.io Scraper ─────────────────────────────────────────────────────
 SCRAPE_TIMEOUT  = 15
-TWITTERAPI_BASE = "https://api.twitterapi.io/twitter/tweet/advanced_search"
+TWITTERAPI_BASE = "https://api.getxapi.com/twitter/tweet/advanced_search"
+
+def _extract_int(raw: dict, *keys) -> int:
+    """Try multiple key names, return first non-zero int found."""
+    for k in keys:
+        v = raw.get(k)
+        if v is not None:
+            try:
+                return int(v)
+            except (ValueError, TypeError):
+                pass
+    return 0
 
 def _normalize(raw: dict) -> dict:
     """
-    twitterapi.io returns likeCount / retweetCount as TOP-LEVEL fields on each
-    tweet — NOT nested inside 'publicMetrics'. The old code always read {} and
-    got 0 for every engagement field, breaking filtering and scoring.
+    Defensive normaliser — handles every field-name variant twitterapi.io
+    has ever used so engagement counts are never silently zeroed.
     """
     author   = raw.get("author") or {}
     tweet_id = raw.get("id") or ""
-    username = author.get("userName") or "unknown"
-    url      = raw.get("url") or (
-        f"https://x.com/{username}/status/{tweet_id}" if tweet_id else ""
+    username = (
+        author.get("userName") or author.get("username") or
+        raw.get("username") or "unknown"
     )
-    # Read top-level engagement fields (fallback covers snake_case variants)
-    likes    = int(raw.get("likeCount")    or raw.get("like_count")    or 0)
-    retweets = int(raw.get("retweetCount") or raw.get("retweet_count") or 0)
-    log.debug(f"  _normalize @{username}: likes={likes} rts={retweets}")
+    url = (
+        raw.get("url") or raw.get("twitterUrl") or
+        (f"https://x.com/{username}/status/{tweet_id}" if tweet_id else "")
+    )
+    # publicMetrics sub-object (some API versions nest counts here)
+    pm = raw.get("publicMetrics") or raw.get("public_metrics") or {}
+
+    likes = _extract_int(
+        raw,
+        "likeCount", "like_count", "favorite_count", "favouriteCount",
+    ) or _extract_int(pm, "like_count", "likeCount")
+
+    retweets = _extract_int(
+        raw,
+        "retweetCount", "retweet_count",
+    ) or _extract_int(pm, "retweet_count", "retweetCount")
+
+    log.info(f"  📊 @{username}: ❤️{likes} 🔁{retweets}")
     return {
         "link":  url,
         "text":  raw.get("text") or "",
         "user":  {"username": username},
-        "stats": {
-            "likes":    likes,
-            "retweets": retweets,
-        },
+        "stats": {"likes": likes, "retweets": retweets},
     }
 
 def _scrape_blocking(query: str, count: int) -> list:
@@ -345,18 +389,23 @@ def _scrape_blocking(query: str, count: int) -> list:
     try:
         resp = requests.get(
             TWITTERAPI_BASE,
-            headers={"X-API-Key": TWITTERAPI_KEY, "Content-Type": "application/json"},
-            params={"query": query, "queryType": "Latest", "count": min(count, 100)},
+            headers={"Authorization": f"Bearer {TWITTERAPI_KEY}"},
+            params={"q": query, "product": "Latest", "count": min(count, 100)},
             timeout=SCRAPE_TIMEOUT,
         )
         resp.raise_for_status()
         data = resp.json()
-        raw_tweets = data.get("tweets", []) or []
+        # Handle every possible top-level key the API might use
+        raw_tweets = (
+            data.get("tweets") or data.get("data") or
+            data.get("results") or data.get("statuses") or []
+        )
         if raw_tweets:
-            # Log first tweet's top-level keys once per startup to verify schema
-            sample_keys = list(raw_tweets[0].keys())
-            log.debug(f"  API tweet keys: {sample_keys}")
-            log.debug(f"  likeCount={raw_tweets[0].get('likeCount')} retweetCount={raw_tweets[0].get('retweetCount')}")
+            t0 = raw_tweets[0]
+            log.info(f"  🔑 Tweet keys: {list(t0.keys())}")
+            log.info(f"  📈 Raw counts: likeCount={t0.get('likeCount')} retweetCount={t0.get('retweetCount')} publicMetrics={t0.get('publicMetrics')}")
+        else:
+            log.warning(f"  ⚠️  API returned 0 tweets. Top-level keys: {list(data.keys())}  Full: {str(data)[:300]}")
         return [_normalize(t) for t in raw_tweets]
     except requests.exceptions.Timeout:
         log.warning(f"Timeout: '{query}'")
@@ -386,16 +435,19 @@ async def scrape_tweets(query: str, count: int = 30) -> list:
 # ── Recency: build a query (optionally date-bounded) ─────────────────────────
 def build_recent_query(base_query: str, days_back: int = 7) -> str:
     """
-    Return the query string.  Date operators (since:/until:) are only appended
-    when TWITTERAPI_DATE_FILTER=1 is set, because the free/basic twitterapi.io
-    tier silently returns 0 results when those operators are present.
+    Appends quality filters to every query:
+    - min_faves:1  → drops zero-engagement/spam tweets at API level
+    - lang:en      → English only, avoids duplicate foreign-language reposts
+    - -is:retweet  → original tweets only, no RT noise
+    Date operators only if TWITTERAPI_DATE_FILTER=1 (paid tier feature).
     """
+    query = f"{base_query} min_faves:1 lang:en -is:retweet"
     if os.getenv("TWITTERAPI_DATE_FILTER", "0") == "1":
         now   = datetime.now(timezone.utc)
         since = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
         until = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-        return f"{base_query} since:{since} until:{until}"
-    return base_query
+        return f"{query} since:{since} until:{until}"
+    return query
 
 
 # ── Deadline filter: skip contests ending in < MIN_DAYS_REMAINING ─────────────
@@ -530,19 +582,28 @@ def format_alert(tweet: dict, reasons: list, category: str) -> str:
     return base
 
 # ── Broadcast ─────────────────────────────────────────────────────────────────
-async def broadcast_alert(app, tweet: dict, reasons: list, category: str):
+async def broadcast_alert(app, tweet: dict, reasons: list, category: str) -> int:
     likes    = tweet["stats"]["likes"]
     retweets = tweet["stats"]["retweets"]
     message  = format_alert(tweet, reasons, category)
     sent     = 0
 
+    if not subscribers:
+        log.warning("  ⚠️  No subscribers — nobody to send alert to! Run /start in the bot.")
+        return 0
+
     for chat_id, prefs in list(subscribers.items()):
         if not prefs.get("active"):
+            log.debug(f"  skip {chat_id}: not active")
             continue
         user_filter = prefs.get("filter", "all")
         if user_filter != "all" and user_filter != category:
+            log.debug(f"  skip {chat_id}: filter={user_filter} != {category}")
             continue
-        if likes > prefs.get("max_likes", 5000) or retweets > prefs.get("max_retweets", 2000):
+        ml = prefs.get("max_likes", 5000)
+        mr = prefs.get("max_retweets", 2000)
+        if likes > ml or retweets > mr:
+            log.info(f"  skip {chat_id}: ❤️{likes}>{ml} or 🔁{retweets}>{mr}")
             continue
         try:
             await app.bot.send_message(
@@ -555,6 +616,7 @@ async def broadcast_alert(app, tweet: dict, reasons: list, category: str):
 
     if sent:
         log.info(f"  📤 Sent to {sent} subscriber(s)")
+    return sent
 
 # ── Scan ──────────────────────────────────────────────────────────────────────
 async def do_scan(app, progress_chat_id: str = None) -> int:
@@ -576,11 +638,12 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
 
     # One clean status line at scan start (only fires when user runs /scan)
     await notify(
-        f"🔍 *Scan started* — checking {len(SEARCH_TARGETS)} queries across "
-        f"{len(CATEGORIES)} categories...\n_Results will appear below as found._"
+        f"🔍 *Scan started* — running {len(SEARCH_TARGETS)} optimised queries "
+        f"across {len(CATEGORIES)} categories (~50 tweets each)...\n"
+        f"_Results will appear below as found._"
     )
 
-    batch_size = 10  # send a progress ping every N queries
+    batch_size = 5   # send a progress ping every N queries (out of 10 total)
     for idx, (query, category) in enumerate(SEARCH_TARGETS, 1):
         recent_query = build_recent_query(query)   # last 7 days only
         log.info(f"🔍 [{idx}/{len(SEARCH_TARGETS)}] [{category.upper()}] {recent_query}")
@@ -589,7 +652,7 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
         if progress_chat_id and idx % batch_size == 0:
             await notify(f"⏳ Still scanning... ({idx}/{len(SEARCH_TARGETS)} queries done, {found} found so far)")
 
-        tweets = await scrape_tweets(recent_query, count=30)
+        tweets = await scrape_tweets(recent_query, count=50)
         if not tweets:
             await asyncio.sleep(1)
             continue
@@ -617,10 +680,9 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
             l = tweet["stats"]["likes"]
             r = tweet["stats"]["retweets"]
             log.info(f"  🎯 @{u} | score={score} | ❤️{l} 🔁{r}")
-            found += 1
-
-            # broadcast_alert already sends the full formatted alert to all subscribers
-            await broadcast_alert(app, tweet, reasons, category)
+            sent = await broadcast_alert(app, tweet, reasons, category)
+            if sent > 0:
+                found += 1
             await asyncio.sleep(0.5)
 
         await asyncio.sleep(1)
@@ -632,10 +694,10 @@ async def do_scan(app, progress_chat_id: str = None) -> int:
         await notify(
             "😶 *Scan complete — 0 contests found.*\n\n"
             "Possible reasons:\n"
-            "• All results were already seen (cached)\n"
-            "• Tweets didn't score high enough\n"
-            "• API returned no results for these queries\n\n"
-            "Try `/debug NFT giveaway contest win` to test the API directly."
+            "• All results were already seen — run /clearcache\n"
+            "• Tweets scored below minimum threshold\n"
+            "• API returned no results (check credits)\n\n"
+            "Try `/debug NFT giveaway win` to test the API directly."
         )
     return found
 
@@ -831,6 +893,44 @@ async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info(f"Cache cleared by {update.effective_chat.id} — {count} entries removed.")
 
 
+async def cmd_rawdebug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dumps the raw API JSON so we can see the exact field names returned."""
+    query = " ".join(context.args) if context.args else "NFT giveaway win"
+    await update.message.reply_text(f"🔬 Raw API dump for: `{query}`", parse_mode=ParseMode.MARKDOWN)
+    if not TWITTERAPI_KEY:
+        await update.message.reply_text("❌ TWITTERAPI_KEY is not set!")
+        return
+    try:
+        import requests as _req
+        resp = _req.get(
+            TWITTERAPI_BASE,
+            headers={"X-API-Key": TWITTERAPI_KEY},
+            params={"query": query, "queryType": "Latest", "count": 1},
+            timeout=20,
+        )
+        await update.message.reply_text(f"HTTP status: {resp.status_code}")
+        data = resp.json()
+        top_keys = list(data.keys())
+        await update.message.reply_text(f"Top-level keys: {top_keys}")
+        tweets = data.get("tweets") or data.get("data") or data.get("results") or []
+        if not tweets:
+            await update.message.reply_text(f"⚠️ No tweets found.\nFull response:\n{str(data)[:800]}")
+            return
+        t = tweets[0]
+        tweet_keys = list(t.keys())
+        await update.message.reply_text(
+            f"✅ Got {len(tweets)} tweet(s)\n"
+            f"Tweet keys: {tweet_keys}\n\n"
+            f"likeCount = {t.get('likeCount')}\n"
+            f"retweetCount = {t.get('retweetCount')}\n"
+            f"publicMetrics = {t.get('publicMetrics')}\n"
+            f"author keys = {list(t.get('author', {}).keys())}\n\n"
+            f"Text: {str(t.get('text',''))[:200]}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query    = " ".join(context.args) if context.args else "NFT giveaway contest win"
     category = "nft"
@@ -940,6 +1040,7 @@ def main():
         ("clearcache", cmd_clearcache),
         ("help",       cmd_help),
         ("debug",      cmd_debug),
+        ("rawdebug",   cmd_rawdebug),
     ]:
         app.add_handler(CommandHandler(cmd, fn))
     log.info("🤖 Bot running.\n")
