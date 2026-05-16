@@ -5,23 +5,17 @@
 ║   Backend: twitterapi.io                                     ║
 ╚══════════════════════════════════════════════════════════════╝
 
-CATEGORIES (all crypto):
-    nft       → NFT giveaways, whitelist raffles, mint contests
-    memecoin  → Memecoin meme & art competitions
-    project   → Airdrop, web3, DeFi, DAO, testnet contests
-    exchange  → Trading competitions, PnL contests, leaderboards
-    creative  → Crypto art, video, meme & thread contests
+CATEGORIES (crypto meme & art only):
+    meme  → Crypto / memecoin meme contests, meme battles, meme competitions
+    art   → Crypto art contests, NFT art, fan art, illustration, design contests
 
 USER COMMANDS:
     /start                → Subscribe to alerts
     /stop                 → Pause alerts
     /status               → Your settings + last scan info
-    /setfilter nft        → NFT contests only
-    /setfilter memecoin   → Memecoin contests only
-    /setfilter project    → Airdrop / web3 project contests only
-    /setfilter exchange   → Trading competitions only
-    /setfilter creative   → Crypto art / video / meme / thread contests only
-    /setfilter all        → All categories (default)
+    /setfilter meme       → Meme contests only
+    /setfilter art        → Art contests only
+    /setfilter all        → Both categories (default)
     /threshold 30 10      → Max likes / max retweets filter
     /scan                 → Run an instant one-time scan
     /autoscan             → Toggle perpetual scan loop on/off
@@ -128,145 +122,130 @@ last_scan_time: str = "Never"
 autoscan_tasks: dict = {}
 
 # ── Categories ────────────────────────────────────────────────────────────────
-CATEGORIES = ["nft", "memecoin", "project", "exchange", "creative"]
+CATEGORIES = ["meme", "art"]
 CATEGORY_EMOJI = {
-    "nft":      "🖼",
-    "memecoin": "🐸",
-    "project":  "🚀",
-    "exchange": "📈",
-    "creative": "🎨",
+    "meme": "🐸",
+    "art":  "🎨",
 }
 
-# ── Search Targets — 10 broad OR-queries, 2 per category ─────────────────────
-# Each query uses Twitter OR operators to cover what 4-9 narrow queries did.
-# 10 API calls total per scan vs the old 43 — same coverage, 77% fewer credits.
+# ── Search Targets — 10 queries, 5 per category ──────────────────────────────
+# Focused exclusively on crypto MEME contests and crypto ART contests.
 SEARCH_TARGETS = [
-    # ── NFT (2 queries) ──────────────────────────────────────────────────────
-    # Covers: giveaway, whitelist, raffle, allowlist, mint, WL spots
+    # ── MEME (5 queries) ─────────────────────────────────────────────────────
+    # General crypto meme contest catchall
     (
-        "(NFT giveaway OR NFT raffle OR NFT whitelist OR allowlist giveaway "
-        "OR wl giveaway OR free NFT OR NFT mint contest) (win OR prize OR winner)",
-        "nft",
+        "(crypto meme contest OR crypto meme competition OR crypto meme battle "
+        "OR crypto meme challenge OR best crypto meme) (win OR prize OR winner)",
+        "meme",
     ),
-    # Covers: art contests, meme contests, collection contests, community drops
+    # Memecoin-specific meme contests (pepe, doge, shib, bonk, wif, etc.)
     (
-        "(NFT art contest OR NFT meme contest OR NFT competition OR NFT prize "
-        "OR NFT collection contest OR NFT community giveaway) crypto",
-        "nft",
+        "(pepe meme contest OR doge meme contest OR shib meme contest "
+        "OR bonk meme contest OR wif meme contest OR memecoin meme contest "
+        "OR memecoin meme battle) (prize OR win OR winner)",
+        "meme",
     ),
-
-    # ── Memecoin (2 queries) ──────────────────────────────────────────────────
-    # Covers: general memecoin contests + named coins (pepe, doge, shib, bonk, wif)
+    # NFT project meme contests
     (
-        "(memecoin contest OR memecoin giveaway OR memecoin meme contest "
-        "OR memecoin competition OR memecoin prize) (win OR winner OR prize pool)",
-        "memecoin",
-    ),
-    # Covers: solana ecosystem + specific coin contests
-    (
-        "(pepe contest OR doge meme contest OR shib contest OR bonk contest "
-        "OR wif contest OR solana meme contest OR memecoin meme battle) prize",
-        "memecoin",
-    ),
-
-    # ── Project / Airdrop / Web3 (2 queries) ─────────────────────────────────
-    # Covers: airdrops, web3, DeFi, DAO, testnet, ambassador contests
-    (
-        "(crypto airdrop contest OR web3 contest OR DeFi contest OR DAO contest "
-        "OR testnet contest OR blockchain contest OR crypto hackathon) prize",
-        "project",
-    ),
-    # Covers: token launches, protocol giveaways, layer2, altcoin contests
-    (
-        "(new token contest OR protocol giveaway OR layer2 contest "
-        "OR altcoin contest OR crypto project giveaway OR crypto launch contest) "
-        "(win OR winner OR prize pool)",
-        "project",
-    ),
-
-    # ── Exchange / Trading (2 queries) ───────────────────────────────────────
-    # Covers: trading competitions, PnL contests, leaderboard prizes
-    (
-        "(trading contest OR trading competition OR trading challenge "
-        "OR PnL contest OR trading leaderboard prize) crypto (prize OR win)",
-        "exchange",
-    ),
-    # Covers: DEX, futures, spot, copy trading, volume contests
-    (
-        "(DEX competition OR futures contest OR spot trading contest "
-        "OR copy trading contest OR volume contest OR crypto trading giveaway) "
-        "(prize pool OR winner OR leaderboard)",
-        "exchange",
-    ),
-
-    # ── Creative (2 queries) ──────────────────────────────────────────────────
-    # Covers: art, fan art, illustration, video, reel contests
-    (
-        "(crypto art contest OR crypto fan art contest OR web3 art contest "
-        "OR crypto video contest OR crypto reel contest OR crypto short film contest) "
+        "(NFT meme contest OR NFT meme competition OR NFT meme challenge "
+        "OR NFT meme battle OR web3 meme contest OR blockchain meme contest) "
         "(prize OR win OR winner)",
-        "creative",
+        "meme",
     ),
-    # Covers: meme battles, thread contests, content creator contests
+    # DeFi / DAO / protocol meme contests
     (
-        "(crypto meme battle OR crypto meme competition OR web3 meme contest "
-        "OR crypto thread contest OR crypto content contest OR crypto creator contest) "
+        "(DeFi meme contest OR DAO meme contest OR protocol meme contest "
+        "OR defi meme challenge OR solana meme contest OR ethereum meme contest) "
         "(prize OR win OR winner)",
-        "creative",
+        "meme",
+    ),
+    # Funniest / best meme submissions with prize signals
+    (
+        "(funniest crypto meme OR best memecoin meme OR submit your meme crypto "
+        "OR meme submission crypto OR meme competition prize crypto) "
+        "(prize pool OR winner OR contest)",
+        "meme",
+    ),
+
+    # ── ART (5 queries) ──────────────────────────────────────────────────────
+    # General crypto art contest catchall
+    (
+        "(crypto art contest OR crypto art competition OR crypto art challenge "
+        "OR web3 art contest OR blockchain art contest) (win OR prize OR winner)",
+        "art",
+    ),
+    # NFT art contests — design, illustration, fan art
+    (
+        "(NFT art contest OR NFT art competition OR NFT fan art contest "
+        "OR NFT illustration contest OR NFT design contest OR NFT artwork contest) "
+        "(prize OR win OR winner)",
+        "art",
+    ),
+    # Specific coin / project fan art contests
+    (
+        "(pepe art contest OR doge art contest OR solana art contest "
+        "OR ethereum art contest OR memecoin art contest OR crypto fan art contest) "
+        "(prize OR win OR winner)",
+        "art",
+    ),
+    # Digital art / pixel art / generative art crypto contests
+    (
+        "(crypto digital art contest OR crypto pixel art contest "
+        "OR crypto generative art contest OR crypto character design contest "
+        "OR web3 illustration contest OR crypto drawing contest) "
+        "(prize OR win OR winner)",
+        "art",
+    ),
+    # Submit your art / artwork with crypto prize signals
+    (
+        "(submit your art crypto OR best crypto artwork OR crypto art submission "
+        "OR crypto art prize pool OR crypto community art contest) "
+        "(winner OR prize OR contest)",
+        "art",
     ),
 ]
 
 # ── Detection Keywords (crypto-only) ─────────────────────────────────────────
+# ── Detection Keywords ────────────────────────────────────────────────────────
 CONTEST_KEYWORDS = {
-    "nft": [
-        "nft giveaway", "nft contest", "nft competition", "nft whitelist",
-        "nft mint", "nft drop", "free nft", "nft winner", "nft art contest",
-        "nft meme contest", "allowlist giveaway", "nft raffle", "nft prize",
-        "nft collection contest", "nft community giveaway", "wl giveaway",
-        "allowlist contest", "nft holder contest",
+    "meme": [
+        # generic meme contest signals
+        "meme contest", "meme competition", "meme battle", "meme challenge",
+        "meme giveaway", "meme prize", "meme submission", "submit your meme",
+        "funniest meme", "best meme", "meme winner", "meme voting",
+        # crypto / coin specific
+        "crypto meme contest", "crypto meme competition", "crypto meme battle",
+        "memecoin meme contest", "memecoin meme battle", "nft meme contest",
+        "web3 meme contest", "defi meme contest", "dao meme contest",
+        "solana meme contest", "ethereum meme contest", "pepe meme contest",
+        "doge meme contest", "shib meme contest", "bonk meme contest",
+        "wif meme contest", "blockchain meme contest",
     ],
-    "memecoin": [
-        "memecoin contest", "meme coin giveaway", "memecoin meme contest",
-        "memecoin competition", "best memecoin meme", "memecoin community contest",
-        "memecoin meme battle", "funniest memecoin meme", "memecoin art contest",
-        "solana meme contest", "memecoin prize", "pepe contest",
-        "doge meme contest", "shib contest", "wif contest", "bonk contest",
-    ],
-    "project": [
-        "airdrop contest", "crypto token giveaway", "defi contest",
-        "web3 contest", "crypto project giveaway", "new token contest",
-        "altcoin contest", "crypto launch contest", "testnet contest",
-        "mainnet giveaway", "protocol giveaway", "dao contest",
-        "blockchain contest", "layer2 contest", "crypto hackathon prize",
-        "web3 community contest", "crypto ambassador contest",
-    ],
-    "exchange": [
-        "trading contest", "trading competition", "trading challenge",
-        "crypto exchange contest", "dex competition", "futures contest",
-        "spot trading contest", "trading prize pool", "pnl contest",
-        "trading leaderboard prize", "volume contest", "copy trading contest",
-        "crypto trading giveaway", "exchange leaderboard prize",
-    ],
-    "creative": [
-        "crypto art contest", "crypto fan art contest", "web3 art contest",
-        "nft art competition", "blockchain art contest", "crypto illustration contest",
-        "crypto video contest", "crypto reel contest", "web3 video contest",
-        "crypto short film contest", "crypto tiktok contest",
-        "crypto meme battle", "crypto meme challenge", "web3 meme contest",
-        "defi meme contest", "crypto meme competition",
-        "crypto thread contest", "best crypto thread", "web3 thread contest",
-        "crypto twitter thread prize", "crypto writing contest",
-        "crypto content contest", "crypto creator contest",
+    "art": [
+        # generic art contest signals
+        "art contest", "art competition", "art challenge", "art giveaway",
+        "art prize", "art submission", "submit your art", "artwork contest",
+        "best artwork", "art winner", "fan art contest", "fan art competition",
+        "illustration contest", "design contest", "drawing contest",
+        "digital art contest", "pixel art contest", "generative art contest",
+        # crypto / coin specific
+        "crypto art contest", "crypto art competition", "crypto art challenge",
+        "nft art contest", "nft art competition", "nft fan art contest",
+        "nft illustration contest", "nft design contest", "nft artwork contest",
+        "web3 art contest", "blockchain art contest", "crypto fan art contest",
+        "pepe art contest", "doge art contest", "solana art contest",
+        "ethereum art contest", "memecoin art contest", "crypto digital art contest",
+        "crypto pixel art contest", "crypto community art contest",
     ],
 }
 
 COMMON_CRYPTO_KEYWORDS = [
     "enter to win", "prize pool", "winner announced", "winners selected",
     "submit your entry", "contest open", "contest ends", "deadline to enter",
-    "voting open", "drop your wallet", "comment your wallet address",
-    "retweet to enter", "follow and retweet", "tag a friend to enter",
+    "voting open", "retweet to enter", "follow and retweet", "tag a friend to enter",
     "best submission wins", "community vote", "like rt follow to win",
     "quote tweet to enter", "qrt to enter", "submit below",
+    "drop your entry", "show us your", "share your",
 ]
 
 CRYPTO_PRIZE_PATTERNS = [
@@ -279,23 +258,23 @@ CRYPTO_PRIZE_PATTERNS = [
     r"(like|retweet|rt|follow)\s*(and|&|\+|to)\s*(enter|win|participate)",
     r"(qrt|quote\s*tweet)\s*(to\s*)?(enter|win|participate)",
     r"(ends?|closes?)\s*(in|on)\s*\d+",
-    r"drop\s*(your|a)\s*(wallet|address)",
-    r"comment\s*(your\s*)?(wallet|address|sol|eth)",
     r"(reply|comment|quote|dm|qrt)\s*(to\s*)?(enter|join|participate|submit|win)",
-    r"airdrop\s*(contest|giveaway|competition)",
-    r"(wl|whitelist|allowlist)\s*(giveaway|contest|raffle|winner|spots?)",
-    r"(mint|minting)\s*(free|contest|giveaway)",
-    r"(thread|video|art|meme|reel)\s*(contest|competition|battle|challenge)",
-    r"best\s+(thread|meme|art|video|reel|content)\s+wins?",
-    r"submit\s+(your\s+)?(thread|meme|art|video|reel|entry)",
-    r"(pnl|trading)\s*(contest|competition|leaderboard)",
-    r"highest\s+(pnl|volume|profit)\s+wins?",
+    r"(art|meme)\s*(contest|competition|battle|challenge)",
+    r"best\s+(meme|art|artwork|design|illustration|drawing|fanart|fan\s+art)\s+wins?",
+    r"submit\s+(your\s+)?(meme|art|artwork|design|illustration|entry)",
+    r"(funniest|best|top)\s+(meme|artwork|art)\s+(wins?|gets?|receives?)",
+    r"(meme|art)\s+(winner|submission|voting|judging)",
+    r"show\s+us\s+your\s+(meme|art|artwork|design)",
+    r"share\s+your\s+(meme|art|artwork|design|creation)",
 ]
 
 EXCLUDE_KEYWORDS = [
     "sponsored", "#ad", "paid partnership", "advertisement",
     "presale", "ido launch", "ico launch",
     "not financial advice", "nfa 🚨", "buy now", "invest now",
+    # Exclude trading/airdrop contests that aren't meme/art
+    "trading competition", "pnl contest", "trading leaderboard",
+    "testnet contest", "hackathon", "whitelist raffle", "wl giveaway",
 ]
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
@@ -807,9 +786,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_subscribers(subscribers)
     await update.message.reply_text(
         "🎯 *Crypto Contest Hunter activated!*\n\n"
-        "You'll receive alerts when low-engagement crypto contests are spotted on X.\n\n"
+        "You'll receive alerts for fresh crypto *meme* and *art* contests spotted on X.\n\n"
         "📌 *Defaults:*\n"
-        "  • Filter: All crypto categories\n"
+        "  • Filter: All (meme + art)\n"
         "  • Max likes: 5000  |  Max retweets: 2000\n\n"
         "Send /help to see all commands.",
         parse_mode=ParseMode.MARKDOWN,
@@ -858,12 +837,9 @@ async def cmd_setfilter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args or args[0].lower() not in valid:
         await update.message.reply_text(
             "Usage: `/setfilter <category>`\n\n"
-            "🖼 `nft`      — NFT giveaways & contests\n"
-            "🐸 `memecoin` — Memecoin meme & art contests\n"
-            "🚀 `project`  — Airdrop, web3, DeFi & DAO contests\n"
-            "📈 `exchange` — Trading competitions & PnL contests\n"
-            "🎨 `creative` — Crypto art, video, meme & thread contests\n"
-            "🏆 `all`      — All categories",
+            "🐸 `meme` — Crypto meme contests only\n"
+            "🎨 `art`  — Crypto art contests only\n"
+            "🏆 `all`  — Both meme & art (default)",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -953,16 +929,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎯 *Crypto Contest Hunter — Commands*\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "*/start* — Subscribe to crypto contest alerts\n"
+        "*/start* — Subscribe to crypto meme & art contest alerts\n"
         "*/stop* — Pause your alerts\n"
         "*/status* — Your settings + last scan time\n\n"
-        "*Filter by crypto category:*\n"
-        "*/setfilter all* — All categories 🏆\n"
-        "*/setfilter nft* — NFT contests 🖼\n"
-        "*/setfilter memecoin* — Memecoin contests 🐸\n"
-        "*/setfilter project* — Airdrop & web3 contests 🚀\n"
-        "*/setfilter exchange* — Trading competitions 📈\n"
-        "*/setfilter creative* — Crypto art/video/meme/threads 🎨\n\n"
+        "*Filter by contest type:*\n"
+        "*/setfilter all* — Meme + Art contests 🏆\n"
+        "*/setfilter meme* — Crypto meme contests only 🐸\n"
+        "*/setfilter art* — Crypto art contests only 🎨\n\n"
         "*/threshold 30 10* — Max likes / max retweets\n"
         "*/scan* — Instant one-time scan\n"
         "*/autoscan* — Toggle continuous scanning ♾\n"
@@ -1024,8 +997,8 @@ async def cmd_rawdebug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query    = " ".join(context.args) if context.args else "NFT giveaway contest win"
-    category = "nft"
+    query    = " ".join(context.args) if context.args else "crypto meme contest win"
+    category = "meme"
     recent_query = build_recent_query(query)
     await update.message.reply_text(
         f"🧪 *Debug:* `{query}`\nFetching 5 recent tweets (last 7 days)...",
@@ -1089,21 +1062,22 @@ def main():
 
     log.info("╔══════════════════════════════════════╗")
     log.info("║   CRYPTO CONTEST HUNTER BOT          ║")
-    log.info("║   Backend : twitterapi.io             ║")
+    log.info("║   Mode    : Meme & Art contests       ║")
+    log.info("║   Backend : getxapi.com               ║")
     log.info(f"║   Interval: every {CHECK_INTERVAL} min              ║")
     log.info("╚══════════════════════════════════════╝")
 
     async def post_init(application):
         await application.bot.set_my_commands([
-            BotCommand("start",     "Subscribe to crypto contest alerts"),
-            BotCommand("stop",      "Pause your alerts"),
-            BotCommand("status",    "Your settings and last scan time"),
-            BotCommand("setfilter", "all | nft | memecoin | project | exchange | creative"),
-            BotCommand("threshold", "Max likes/retweets — e.g. /threshold 30 10"),
+            BotCommand("start",      "Subscribe to crypto meme & art contest alerts"),
+            BotCommand("stop",       "Pause your alerts"),
+            BotCommand("status",     "Your settings and last scan time"),
+            BotCommand("setfilter",  "all | meme | art"),
+            BotCommand("threshold",  "Max likes/retweets — e.g. /threshold 30 10"),
             BotCommand("scan",       "Run an instant scan now"),
             BotCommand("autoscan",   "Toggle continuous scanning on/off"),
             BotCommand("clearcache", "Clear seen-tweets cache to re-fetch all results"),
-            BotCommand("debug",      "Test a query — e.g. /debug NFT giveaway"),
+            BotCommand("debug",      "Test a query — e.g. /debug crypto meme contest"),
             BotCommand("help",       "Show all commands"),
         ])
         start_scheduler(application)
